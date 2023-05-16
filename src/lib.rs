@@ -223,6 +223,8 @@ impl<'dummy, T> DropArena<'dummy, T> {
     }
 }
 
+// experimenting
+
 /// Allocates a `DropArena<F::Item>` and calls `f.use_arena` on it.
 #[inline]
 pub fn with_new<R, F: ArenaUser<Output = R>>(f: F) -> R {
