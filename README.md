@@ -18,12 +18,7 @@ also use the `DropArena::box_to_inner` method to retrieve the underlying `T` fro
 it used.
 
 To guarantee that an arena can only reclaim memory from `DropBox`es it allocated, we need to use continuation-passing
-style and lifetime magic. A `DropArena` is tagged with a special "dummy" lifetime `'dummy` at compile time. 
-Every `DropBox` produced by that `DropArena` is tagged with the same "dummy" lifetime (in addition to a lifetime that
-ensures the `DropBox` cannot outlive its `DropArena`). A `DropArena` can only drop a `DropBox` which has the same dummy
-lifetime parameter. Both `DropArena`s and `DropBox`es have an invariant relationship with the dummy parameter.
+style and lifetime magic. A `DropArena` is tagged with the lifetime it will live. 
 
 How do we ensure the compiler doesn't assign two `DropArena`s the same dummy lifetime? We only allow use of the `DropArena` 
-through a continuation that can handle a `DropArena` with any dummy lifetime. The best way to handle this would be 
-using a `for<'dummy> FnOnce()` trait, but this fails in rather subtle ways; see 
-[link](https://github.com/rust-lang/rust/issues/100013). To use an Arena, you must define an `ArenaUser`. 
+through a continuation that can handle a `DropArena` with any dummy lifetime. 

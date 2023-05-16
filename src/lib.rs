@@ -8,6 +8,8 @@ use std::{mem, ptr};
 
 use typed_arena::Arena;
 
+/// An Item is either a free block, in which case it has a pointer to the next free block,
+/// or it is occupied by a `T`.
 union Item<T> {
     pointer: Option<NonNull<Item<T>>>,
     item: ManuallyDrop<T>,
@@ -28,6 +30,7 @@ type Invariant<'b> = PhantomData<*mut &'b i32>;
 /// This type is roughly equivalent to a `&'b mut T`. It has an artificial invariant relationship
 /// with the lifetime `'a`. Can only be created using a `DropManager`.
 #[repr(transparent)]
+// safety: a `DropBox<'arena, T>` must be transmutable to a `NonNull<Item<T>>`.
 pub struct DropBox<'arena, T> {
     pointer: &'arena mut Item<T>,
     _phantom: Invariant<'arena>,
@@ -75,23 +78,26 @@ impl<'arena, T> DropBox<'arena, T> {
     /// the `T`. The memory used to allocate the underlying `T` will be freed when the underlying
     /// `DropArena` is freed. To also free the memory, see `DropArena::box_to_inner`.
     #[inline]
-    pub fn to_inner(mut self) -> T {
-        // Safety: we don't use `self` again after the call to `take_inner`.
-        unsafe { self.take_inner() }
-    }
-
-    #[inline]
-    pub fn leak(mut self) -> &'arena mut T {
+    pub fn into_inner(mut self) -> T {
         // Safety: we don't use `self` again after the call to `take_inner`.
         unsafe {
-            let result = (self.deref_mut() as *mut T).as_mut().unwrap();
+            let result = self.take_inner();
             mem::forget(self);
             result
         }
     }
 
+    ///
+    #[inline]
+    pub fn leak(self) -> &'arena mut T {
+        // Safety: we must use transmute to avoid violating stacked borrows.
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
     /// Safety: after this function is called, we can't use our `DropBox` as a reference to
-    /// the underlying `T` again.
+    /// the underlying `T` again. This includes not calling `Drop`.
     #[inline]
     unsafe fn take_inner(&mut self) -> T {
         ManuallyDrop::take(&mut self.pointer.item)
@@ -121,20 +127,59 @@ pub struct DropArena<'arena, T> {
     _phantom: Invariant<'arena>,
 }
 
-/// An object that can use a `DropArena` safely. I would strongly prefer not needing this trait
-/// and instead using closures, but this is not yet possible.
-pub trait ArenaUser {
-    type Item<'arena>
-    where
-        Self: 'arena;
-    type Output;
+/// A family of types indexed by the lifetime of the arena they are to be allocated in. Useful when
+/// storing recursive data structures inside an arena.
+pub trait ArenaFamily {
+    type Item<'arena> where Self: 'arena;
 
-    fn use_arena<'arena>(
-        self,
-        arena: &'arena DropArena<'arena, Self::Item<'arena>>,
-    ) -> Self::Output
-    where
-        Self: 'arena;
+
+}
+
+
+/// State how you plan to use a `DropArena`, and this function will produce the necessary `DropArena`.
+///
+/// ```
+/// use drop_arena::{ArenaFamily, DropArena, DropBox, with_new};
+/// struct Node<'arena> {
+///     item: i32,
+///     next: Option<DropBox<'arena, Node<'arena>>>,
+/// }
+///
+/// struct List<'arena> {
+///     start: Option<DropBox<'arena, Node<'arena>>>,
+///     arena: &'arena DropArena<'arena, Node<'arena>>,
+/// }
+///
+/// struct NodeFam;
+///
+/// impl ArenaFamily for NodeFam {
+///     type Item<'arena> = Node<'arena>;
+/// }
+///
+/// let sum = with_new::<NodeFam, _>(|arena| {
+///     let mut list = List { start: None, arena };
+///     for i in 0..=100 {
+///         list.start = Some(list.arena.alloc(Node { item: i, next: list.start.take() }));
+///     }
+///
+///     let mut total = 0;
+///     while let Some(node) = list.start.take() {
+///         let node = list.arena.box_to_inner(node);
+///         total += node.item;
+///         list.start = node.next;
+///     };
+///     total
+/// });
+///
+/// assert_eq!(sum, 5050);
+/// ```
+pub fn with_new<F: ArenaFamily, R>(cont: impl for<'arena> FnOnce(&'arena DropArena<'arena, F::Item<'arena>>) -> R) -> R {
+    cont(&DropArena::new(Arena::new()))
+}
+
+/// Just like `with_new`, except that as an optimization, we specify a starting size for our arena.
+pub fn with_new_cap<F: ArenaFamily, R>(cont: impl for<'arena> FnOnce(&'arena DropArena<'arena, F::Item<'arena>>) -> R, n: usize) -> R {
+    cont(&DropArena::new(Arena::with_capacity(n)))
 }
 
 // TODO: make `DropArena` work efficiently on ZSTs.
@@ -153,11 +198,11 @@ impl<'arena, T> DropArena<'arena, T> {
         }
     }
 
-    /// May only be called if `ptr` is a pointer to an `Item` allocated by `self.arena`,
-    /// and if `ptr` is not in the linked list of free items already, and if there are no
-    /// references to `ptr.item` floating around.
+    /// May only be called if `ptr` is a pointer to an `Item` allocated by `self.arena` and
+    /// `ptr` is not in the linked list of free items already.
     #[inline]
     unsafe fn add_free_item(&'arena self, ptr: DropBox<'arena, T>) {
+        // safety: we need to use mem::transmute for the purposes of StackedBorrows
         let mut ptr: NonNull<Item<T>> = mem::transmute(ptr);
         ptr.as_mut().pointer = self.start.replace(Some(ptr))
     }
@@ -223,189 +268,146 @@ impl<'arena, T> DropArena<'arena, T> {
     }
 }
 
-/// Allocates a `DropArena<F::Item>` and calls `f.use_arena` on it.
-#[inline]
-pub fn with_new<R, F: ArenaUser<Output = R>>(f: F) -> R {
-    f.use_arena(&DropArena::new(Arena::new()))
-}
-
-/// Allocates a `DropArena<F::Item>` with capacity `n` and calls `f.use_arena` on it.
-#[inline]
-pub fn with_capacity<R, F: ArenaUser<Output = R>>(f: F, n: usize) -> R {
-    f.use_arena(&DropArena::new(Arena::with_capacity(n)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Node<'arena, T> {
+        item: T,
+        rest: Ptr<'arena, T>,
+    }
+
+    type Ptr<'arena, T> = Option<DropBox<'arena, Node<'arena, T>>>;
+
+    struct List<'arena, T> {
+        arena: &'arena DropArena<'arena, Node<'arena, T>>,
+        ptr: Ptr<'arena, T>,
+    }
+
+    impl<'arena, T> Drop for List<'arena, T> {
+        fn drop(&mut self) {
+            while let Some(_) = self.pop() {}
+        }
+    }
+
+    impl<'d, T> List<'d, T> {
+        fn push(&mut self, val: T) {
+            self.ptr = Some(self.arena.alloc(Node {
+                item: val,
+                rest: self.ptr.take(),
+            }))
+        }
+
+        fn pop(&mut self) -> Option<T> {
+            let first = self.ptr.take()?;
+            let node = self.arena.box_to_inner(first);
+            self.ptr = node.rest;
+            Some(node.item)
+        }
+
+        fn into_vec(mut self) -> Vec<T> {
+            let mut vec = vec![];
+            while let Some(t) = self.pop() {
+                vec.push(t);
+            }
+            vec
+        }
+
+        fn new(arena: &'d DropArena<'d, Node<'d, T>>) -> Self {
+            Self { arena, ptr: None }
+        }
+    }
+
     #[test]
     fn test_linked_list() {
-        struct Node<'arena, T> {
-            item: T,
-            rest: Ptr<'arena, T>,
+        struct NodeFam<T>(PhantomData<T>);
+
+        impl<T> ArenaFamily for NodeFam<T> {
+            type Item<'arena> = Node<'arena, T> where Self: 'arena;
         }
 
-        type Ptr<'arena, T> = Option<DropBox<'arena, Node<'arena, T>>>;
 
-        struct List<'arena, T> {
-            arena: &'arena DropArena<'arena, Node<'arena, T>>,
-            ptr: Ptr<'arena, T>,
-        }
-
-        impl<'arena, T> Drop for List<'arena, T> {
-            fn drop(&mut self) {
-                while let Some(_) = self.pop() {}
+        let v1 = with_new::<NodeFam<_>, _>(|arena| {
+            let mut list = List::new(arena);
+            for i in 0..100 {
+                list.push(i);
             }
-        }
+            list.into_vec()
+        });
 
-        impl<'d, T> List<'d, T> {
-            fn push(&mut self, val: T) {
-                self.ptr = Some(self.arena.alloc(Node {
-                    item: val,
-                    rest: self.ptr.take(),
-                }))
-            }
-
-            fn pop(&mut self) -> Option<T> {
-                let first = self.ptr.take()?;
-                let node = self.arena.box_to_inner(first);
-                self.ptr = node.rest;
-                Some(node.item)
-            }
-
-            fn into_vec(mut self) -> Vec<T> {
-                let mut vec = vec![];
-                while let Some(t) = self.pop() {
-                    vec.push(t);
-                }
-                vec
-            }
-
-            fn new(arena: &'d DropArena<'d, Node<'d, T>>) -> Self {
-                Self { arena, ptr: None }
-            }
-        }
-
-        struct Maker;
-
-        impl ArenaUser for Maker {
-            type Item<'arena> = Node<'arena, i32>;
-            type Output = Vec<i32>;
-
-            fn use_arena<'arena>(
-                self,
-                arena: &'arena DropArena<'arena, Self::Item<'arena>>,
-            ) -> Self::Output where Self: 'arena {
-                let mut list = List::new(arena);
-                for i in 0..100 {
-                    list.push(i);
-                }
-                list.into_vec()
-            }
-        }
-
-        let v1 = with_new(Maker);
-        let v2: Vec<i32> = (0..100).rev().collect();
+        let v2: Vec<_> = (0..100).rev().collect();
         assert_eq!(v1, v2);
 
-        struct Tester;
+        with_new::<NodeFam<_>, _>(|arena| {
+            let mut list = List::new(arena);
 
-        impl ArenaUser for Tester {
-            type Item<'arena> = Node<'arena, usize>;
-            type Output = ();
-
-            fn use_arena<'arena>(self, arena: &'arena DropArena<'arena, Self::Item<'arena>>) -> Self::Output where Self: 'arena {
-                let mut list = List::new(arena);
-
-                for i in 0..100 {
-                    list.push(i);
-                }
-
-                assert_eq!(arena.arena.len(), 100);
-                assert_eq!(arena.len(), 100);
-
-                for i in (50..100).rev() {
-                    assert_eq!(i, list.pop().unwrap());
-                    assert_eq!(arena.len(), i);
-                    assert_eq!(arena.arena.len(), 100);
-                }
-
-                for i in 50..100 {
-                    list.push(i);
-                    assert_eq!(arena.len(), i + 1);
-                    assert_eq!(arena.arena.len(), 100);
-                }
-
-                println!("Finished with Tester::use_arena");
+            for i in 0..100 {
+                list.push(i);
             }
-        }
 
-        with_capacity(Tester, 100)
+            assert_eq!(arena.arena.len(), 100);
+            assert_eq!(arena.len(), 100);
+
+            for i in (50..100).rev() {
+                assert_eq!(i, list.pop().unwrap());
+                assert_eq!(arena.len(), i);
+                assert_eq!(arena.arena.len(), 100);
+            }
+
+            for i in 50..100 {
+                list.push(i);
+                assert_eq!(arena.len(), i + 1);
+                assert_eq!(arena.arena.len(), 100);
+            }
+
+            println!("Finished with Tester::use_arena");
+
+        });
+    }
+
+    struct IntFam;
+
+    impl ArenaFamily for IntFam {
+        type Item<'arena> = i32;
     }
 
     #[test]
     fn simple() {
-        struct Simple;
+        with_new::<IntFam, _>(|arena| {
+            let b = arena.alloc(5);
+            arena.drop_box(b);
+            let _b2 = arena.alloc(6);
+        });
+    }
 
-        impl ArenaUser for Simple {
-            type Item<'arena>  = i32 where Self: 'arena;
-            type Output = ();
-
-            fn use_arena<'arena>(self, arena: &'arena DropArena<'arena, Self::Item<'arena>>) -> Self::Output where Self: 'arena {
-                let b = arena.alloc(5);
-                arena.drop_box(b);
-                let _b2 = arena.alloc(6);
-            }
-        }
-
-        with_new(Simple)
+    #[test]
+    fn test_box_functions() {
+        with_new::<IntFam, _>(|arena| {
+            let b = arena.alloc(5);
+            let r = b.leak();
+            *r += 1;
+            let b2 = arena.alloc(10);
+            *r += b2.into_inner();
+        })
     }
 
     #[test]
     fn test_nested() {
-        struct S1;
-        impl ArenaUser for S1 {
-            type Item<'arena> = i32;
-            type Output = i32;
-
-            fn use_arena<'arena>(
-                self,
-                arena: &'arena DropArena<'arena, Self::Item<'arena>>,
-            ) -> Self::Output where Self: 'arena {
-
-                struct S2<'arena>(&'arena DropArena<'arena, i32>);
-
-                impl<'d1> ArenaUser for S2<'d1> {
-                    type Item<'arena> = i32 where Self: 'arena;
-                    type Output = i32;
-
-                    fn use_arena<'d2>(
-                        self,
-                        arena2: &'d2 DropArena<'d2, Self::Item<'d2>>,
-                    ) -> Self::Output
-                    where
-                        Self: 'd2,
-                    {
-                        let arena1 = self.0;
-                        let mut b1 = arena1.alloc(5);
-                        let b2 = arena2.alloc(6);
-                        *b1 += 100;
-                        assert_eq!(arena1.box_to_inner(b1), 105);
-                        // arena1.drop_box(b2); // Doesn't compile
-                        let r = arena2.box_to_inner(b2);
-                        assert_eq!(arena2.len(), 0);
-                        r
-                    }
-                }
-
-
-                let r = with_new(S2(arena));
-                assert_eq!(arena.len(), 0);
+        assert_eq!(with_new::<IntFam, _>(|arena| {
+            let r = with_new::<IntFam, _>(|arena2| {
+                let arena1 = arena;
+                let mut b1 = arena1.alloc(5);
+                let b2 = arena2.alloc(6);
+                *b1 += 100;
+                assert_eq!(arena1.box_to_inner(b1), 105);
+                // arena1.drop_box(b2); // Doesn't compile
+                let r = arena2.box_to_inner(b2);
+                assert_eq!(arena2.len(), 0);
                 r
-            }
-        }
+            });
 
-
-        assert_eq!(with_new(S1), 6);
+            assert_eq!(arena.len(), 0);
+            r
+        }), 6);
     }
 }
