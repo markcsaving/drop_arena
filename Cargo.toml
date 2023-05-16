@@ -2,7 +2,7 @@
 name = "drop_arena"
 version = "0.1.0"
 edition = "2021"
-authors = ["Mark Saving"]
+authors = ["Mark Saving <marksaving@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

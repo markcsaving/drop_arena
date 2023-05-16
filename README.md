@@ -23,3 +23,7 @@ Every `DropBox` produced by that `DropArena` is tagged with the same "dummy" lif
 ensures the `DropBox` cannot outlive its `DropArena`). A `DropArena` can only drop a `DropBox` which has the same dummy
 lifetime parameter. Both `DropArena`s and `DropBox`es have an invariant relationship with the dummy parameter.
 
+How do we ensure the compiler doesn't assign two `DropArena`s the same dummy lifetime? We only allow use of the `DropArena` 
+through a continuation that can handle a `DropArena` with any dummy lifetime. The best way to handle this would be 
+using a `for<'dummy> FnOnce()` trait, but this fails in rather subtle ways; see 
+[link](https://github.com/rust-lang/rust/issues/100013). To use an Arena, you must define an `ArenaUser`. 
