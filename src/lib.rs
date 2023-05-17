@@ -1,3 +1,17 @@
+#![warn(missing_docs)]
+
+//! This crate provides a custom allocator that can allocate items of a single type, much like
+//! [typed-arena](https://docs.rs/crate/typed-arena/latest). A `typed_arena::Arena<T>` allocates
+//! a `T` and returns a `&mut T`; the `T` will be dropped when the arena itself goes out of scope.
+//!
+//! By contrast, a [`DropArena<T>`] allocates a `T` and returns a [`DropBox<T>`]. As the
+//! name suggests, a [`DropBox<T>`] is very similar to a [`Box<T>`]. While a [`Box<T>`] is tied to the
+//! single global allocator, a [`DropBox<T>`] is tied to the [`DropArena`] which allocated it. A
+//! [`DropBox<T>`] can be consumed by its creator [`DropArena<T>`], which frees up the memory so that the
+//! [`DropArena<T>`] can reuse it on another allocation and either returns or drops the underlying `T`.
+//!
+//! In order to expose a safe API, it is necessary
+
 use std::borrow::{Borrow, BorrowMut};
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -8,9 +22,11 @@ use std::{mem, ptr};
 
 use typed_arena::Arena;
 
+
 /// An Item is either a free block, in which case it has a pointer to the next free block,
 /// or it is occupied by a `T`.
 union Item<T> {
+    /// In the pointer variant,
     pointer: Option<NonNull<Item<T>>>,
     item: ManuallyDrop<T>,
 }
@@ -27,10 +43,9 @@ impl<T> Item<T> {
 /// A ZST which invariantly depends on `'b`.
 type Invariant<'b> = PhantomData<*mut &'b i32>;
 
-/// This type is roughly equivalent to a `&'b mut T`. It has an artificial invariant relationship
-/// with the lifetime `'a`. Can only be created using a `DropManager`.
+/// An owning pointer to a `T` which has been allocated with a [`DropArena<'arena, T>`].
 #[repr(transparent)]
-// safety: a `DropBox<'arena, T>` must be transmutable to a `NonNull<Item<T>>`.
+// safety: a [`DropBox<'arena, T>`] must be transmutable to a [`NonNull<Item<T>>`].
 pub struct DropBox<'arena, T> {
     pointer: &'arena mut Item<T>,
     _phantom: Invariant<'arena>,
@@ -67,8 +82,8 @@ impl<'arena, T> BorrowMut<T> for DropBox<'arena, T> {
 }
 
 impl<'arena, T> DropBox<'arena, T> {
-    /// Safety: after this function is called, we can't use our `DropBox` as a reference to
-    /// the underlying `T` again. This includes not calling `drop` on `self`.
+    /// Safety: after this function is called, we can't use our [`DropBox`] as a reference to
+    /// the underlying `T` again. This includes not calling [`drop`] on `self`.
     #[inline]
     unsafe fn drop_inner(&mut self) {
         ptr::drop_in_place::<T>(self.deref_mut())
@@ -87,12 +102,15 @@ impl<'arena, T> DropBox<'arena, T> {
         }
     }
 
-    ///
+    /// Leaks `self`. The underlying `T` will never be dropped, nor will the memory allocated to
+    /// store the `T` be reclaimed by the [`DropArena<T>`]. Only once the [`DropArena<T>`] is itself dropped
+    /// will the memory be returned to the runtime.
     #[inline]
     pub fn leak(self) -> &'arena mut T {
         // Safety: we must use transmute to avoid violating stacked borrows.
         unsafe {
-            mem::transmute(self)
+            let item_ptr: &'arena mut Item<T> = mem::transmute(self);
+            &mut item_ptr.item
         }
     }
 
@@ -130,6 +148,7 @@ pub struct DropArena<'arena, T> {
 /// A family of types indexed by the lifetime of the arena they are to be allocated in. Useful when
 /// storing recursive data structures inside an arena.
 pub trait ArenaFamily {
+    /// The associated type family
     type Item<'arena> where Self: 'arena;
 
 
@@ -174,12 +193,12 @@ pub trait ArenaFamily {
 /// assert_eq!(sum, 5050);
 /// ```
 pub fn with_new<F: ArenaFamily, R>(cont: impl for<'arena> FnOnce(&'arena DropArena<'arena, F::Item<'arena>>) -> R) -> R {
-    cont(&DropArena::new(Arena::new()))
+    unsafe { cont(&DropArena::new()) }
 }
 
 /// Just like `with_new`, except that as an optimization, we specify a starting size for our arena.
 pub fn with_new_cap<F: ArenaFamily, R>(cont: impl for<'arena> FnOnce(&'arena DropArena<'arena, F::Item<'arena>>) -> R, n: usize) -> R {
-    cont(&DropArena::new(Arena::with_capacity(n)))
+    unsafe { cont(&DropArena::new_with_capacity(n)) }
 }
 
 // TODO: make `DropArena` work efficiently on ZSTs.
@@ -207,7 +226,7 @@ impl<'arena, T> DropArena<'arena, T> {
         ptr.as_mut().pointer = self.start.replace(Some(ptr))
     }
 
-    /// This function produces the underlying `T` from a `ManualDropBox<T>`, freeing the
+    /// This function produces the underlying `T` from a [`DropBox<T>`], freeing the
     /// associated memory.
     #[inline]
     pub fn box_to_inner(&'arena self, mut x: DropBox<'arena, T>) -> T {
@@ -219,22 +238,13 @@ impl<'arena, T> DropArena<'arena, T> {
     }
 
     #[inline]
-    fn new(arena: Arena<Item<T>>) -> Self {
+    fn from_arena(arena: Arena<Item<T>>) -> Self {
         DropArena {
             arena,
             start: Cell::new(None),
             _phantom: Default::default(),
         }
     }
-
-    // /// Allocates a `DropArena<F::Item>` with capacity `n` and calls `cont` on it.
-    // #[inline]
-    // pub fn with_capacity<R, F: DummyFamily>(
-    //     cont: impl for<'c> FnOnce(DropArena<'c, F::Item<'c>>) -> R,
-    //     n: usize,
-    // ) -> R {
-    //     cont(DropArena::new(Arena::with_capacity(n)))
-    // }
 
     /// Allocates `value` in our arena.
     #[inline]
@@ -266,6 +276,48 @@ impl<'arena, T> DropArena<'arena, T> {
         }
         self.arena.len() - count
     }
+
+    /// Produces a new `DropArena`. Calling this function puts all responsibility on you to
+    /// only call [`Self::drop_box`] and [`Self::box_to_inner`] when the [`DropBox`] in question
+    /// has been allocated by [`DropArena`]. Prefer [`with_new`] whenever possible.
+    ///
+    /// ```
+    /// use drop_arena::DropArena;
+    /// unsafe {
+    ///     let mut arenas = Vec::new();
+    ///     for i in 0..10 {
+    ///         arenas.push(DropArena::new());
+    ///     }
+    ///
+    ///     let mut boxes = Vec::new();
+    ///     for i in 0..10 {
+    ///         for j in 0..10 {
+    ///             boxes.push(arenas[i].alloc(j));
+    ///         }
+    ///     }
+    ///
+    ///     let sum: i32 = boxes.iter().map::<i32, _>(|bx| **bx).sum();
+    ///     assert_eq!(sum, 450);
+    ///
+    ///     for i in (0..10).rev() {
+    ///         for _ in 0..10 {
+    ///             // We make sure to drop the boxes using the arena they came from.
+    ///             arenas[i].drop_box(boxes.pop().unwrap());
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub unsafe fn new() -> Self {
+        Self::from_arena(Arena::new())
+    }
+
+    /// Exactly like [`Self::new`], except that we allocate a fixed starting capacity. Prefer
+    /// to use [`with_capacity`].
+    #[inline]
+    pub unsafe fn new_with_capacity(n: usize) -> Self {
+        Self::from_arena(Arena::with_capacity(n))
+    }
 }
 
 #[cfg(test)]
@@ -286,7 +338,9 @@ mod tests {
 
     impl<'arena, T> Drop for List<'arena, T> {
         fn drop(&mut self) {
-            while let Some(_) = self.pop() {}
+            while let Some(mut nxt) = self.ptr.take() {
+                self.ptr = nxt.rest.take();
+            }
         }
     }
 
