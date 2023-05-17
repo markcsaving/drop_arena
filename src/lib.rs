@@ -216,17 +216,22 @@ impl<'arena, T> DropArena<'arena, T> {
         }
     }
 
-    /// Computes the total number of items that have been allocated and not deallocated. This function
-    /// is slow, so it should only be called infrequently.
+    /// Computes the total number of items that have been allocated, minus the number that have been
+    /// deallocated. This function is slow, so it should only be called infrequently.
+    /// Note that if this arena is calling [`DropArena::drop_box`] on boxes allocated by another
+    /// [`DropArena`] of the same lifetime, the answer could be negative.
     #[inline]
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> isize {
         let mut next = self.start.get();
         let mut count = 0;
         while let Some(ptr) = next {
             count += 1;
             unsafe { next = ptr.as_ref().pointer }
         }
-        self.arena.len() - count
+        assert!(count <= isize::MAX as usize);
+        let len = self.arena.len();
+        assert!(len <= isize::MAX as usize);
+        (self.arena.len() as isize) - (count as isize)
     }
 
     /// Produces a new `DropArena`.
