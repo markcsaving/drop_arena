@@ -26,8 +26,16 @@ use typed_arena::Arena;
 /// An Item is either a free block, in which case it has a pointer to the next free block,
 /// or it is occupied by a `T`.
 union Item<T> {
-    /// In the pointer variant,
+    /// In the `pointer` variant, this [`Item<T>`] is a node in a linked list of [`Item<T>`]s,
+    /// all of which are in the `pointer` variant. The pointer is semantically a [`&'arena mut T`], where
+    /// where `&'arena` is the lifetime of the arena the [`Item`] occurs within; it should have the
+    /// same no-alias guarantees. Note that if we have two [`DropArena<'arena, T>`]s, their free
+    /// lists can "cross over" in the sense that arena 1's free list can include blocks originally
+    /// allocated by 2 and vice versa, but their lists cannot overlap because of the no-alias
+    /// invariant.
     pointer: Option<NonNull<Item<T>>>,
+
+    /// In the `item`, the `T`'s lifetime is controlled by a `DropBox<T>`.
     item: ManuallyDrop<T>,
 }
 
@@ -145,62 +153,6 @@ pub struct DropArena<'arena, T> {
     _phantom: Invariant<'arena>,
 }
 
-/// A family of types indexed by the lifetime of the arena they are to be allocated in. Useful when
-/// storing recursive data structures inside an arena.
-pub trait ArenaFamily {
-    /// The associated type family
-    type Item<'arena> where Self: 'arena;
-
-
-}
-
-
-/// State how you plan to use a `DropArena`, and this function will produce the necessary `DropArena`.
-///
-/// ```
-/// use drop_arena::{ArenaFamily, DropArena, DropBox, with_new};
-/// struct Node<'arena> {
-///     item: i32,
-///     next: Option<DropBox<'arena, Node<'arena>>>,
-/// }
-///
-/// struct List<'arena> {
-///     start: Option<DropBox<'arena, Node<'arena>>>,
-///     arena: &'arena DropArena<'arena, Node<'arena>>,
-/// }
-///
-/// struct NodeFam;
-///
-/// impl ArenaFamily for NodeFam {
-///     type Item<'arena> = Node<'arena>;
-/// }
-///
-/// let sum = with_new::<NodeFam, _>(|arena| {
-///     let mut list = List { start: None, arena };
-///     for i in 0..=100 {
-///         list.start = Some(list.arena.alloc(Node { item: i, next: list.start.take() }));
-///     }
-///
-///     let mut total = 0;
-///     while let Some(node) = list.start.take() {
-///         let node = list.arena.box_to_inner(node);
-///         total += node.item;
-///         list.start = node.next;
-///     };
-///     total
-/// });
-///
-/// assert_eq!(sum, 5050);
-/// ```
-pub fn with_new<F: ArenaFamily, R>(cont: impl for<'arena> FnOnce(&'arena DropArena<'arena, F::Item<'arena>>) -> R) -> R {
-    unsafe { cont(&DropArena::new()) }
-}
-
-/// Just like `with_new`, except that as an optimization, we specify a starting size for our arena.
-pub fn with_new_cap<F: ArenaFamily, R>(cont: impl for<'arena> FnOnce(&'arena DropArena<'arena, F::Item<'arena>>) -> R, n: usize) -> R {
-    unsafe { cont(&DropArena::new_with_capacity(n)) }
-}
-
 // TODO: make `DropArena` work efficiently on ZSTs.
 
 impl<'arena, T> DropArena<'arena, T> {
@@ -277,45 +229,16 @@ impl<'arena, T> DropArena<'arena, T> {
         self.arena.len() - count
     }
 
-    /// Produces a new `DropArena`. Calling this function puts all responsibility on you to
-    /// only call [`Self::drop_box`] and [`Self::box_to_inner`] when the [`DropBox`] in question
-    /// has been allocated by [`DropArena`]. Prefer [`with_new`] whenever possible.
-    ///
-    /// ```
-    /// use drop_arena::DropArena;
-    /// unsafe {
-    ///     let mut arenas = Vec::new();
-    ///     for i in 0..10 {
-    ///         arenas.push(DropArena::new());
-    ///     }
-    ///
-    ///     let mut boxes = Vec::new();
-    ///     for i in 0..10 {
-    ///         for j in 0..10 {
-    ///             boxes.push(arenas[i].alloc(j));
-    ///         }
-    ///     }
-    ///
-    ///     let sum: i32 = boxes.iter().map::<i32, _>(|bx| **bx).sum();
-    ///     assert_eq!(sum, 450);
-    ///
-    ///     for i in (0..10).rev() {
-    ///         for _ in 0..10 {
-    ///             // We make sure to drop the boxes using the arena they came from.
-    ///             arenas[i].drop_box(boxes.pop().unwrap());
-    ///         }
-    ///     }
-    /// }
-    /// ```
+    /// Produces a new `DropArena`.
     #[inline]
-    pub unsafe fn new() -> Self {
+    pub fn new() -> Self {
         Self::from_arena(Arena::new())
     }
 
     /// Exactly like [`Self::new`], except that we allocate a fixed starting capacity. Prefer
     /// to use [`with_capacity`].
     #[inline]
-    pub unsafe fn new_with_capacity(n: usize) -> Self {
+    pub fn new_with_capacity(n: usize) -> Self {
         Self::from_arena(Arena::with_capacity(n))
     }
 }
@@ -374,25 +297,23 @@ mod tests {
 
     #[test]
     fn test_linked_list() {
-        struct NodeFam<T>(PhantomData<T>);
-
-        impl<T> ArenaFamily for NodeFam<T> {
-            type Item<'arena> = Node<'arena, T> where Self: 'arena;
-        }
 
 
-        let v1 = with_new::<NodeFam<_>, _>(|arena| {
+
+        let v1 = {
+            let arena = &DropArena::new();
             let mut list = List::new(arena);
             for i in 0..100 {
                 list.push(i);
             }
             list.into_vec()
-        });
+        };
 
         let v2: Vec<_> = (0..100).rev().collect();
         assert_eq!(v1, v2);
 
-        with_new::<NodeFam<_>, _>(|arena| {
+        {
+            let arena = &DropArena::new();
             let mut list = List::new(arena);
 
             for i in 0..100 {
@@ -416,52 +337,58 @@ mod tests {
 
             println!("Finished with Tester::use_arena");
 
-        });
-    }
-
-    struct IntFam;
-
-    impl ArenaFamily for IntFam {
-        type Item<'arena> = i32;
+        };
     }
 
     #[test]
     fn simple() {
-        with_new::<IntFam, _>(|arena| {
+        let arena = &DropArena::new();
             let b = arena.alloc(5);
             arena.drop_box(b);
             let _b2 = arena.alloc(6);
-        });
     }
 
     #[test]
-    fn test_box_functions() {
-        with_new::<IntFam, _>(|arena| {
+    fn test_box_functions() {{
+        let arena = &DropArena::new();
             let b = arena.alloc(5);
             let r = b.leak();
             *r += 1;
             let b2 = arena.alloc(10);
             *r += b2.into_inner();
-        })
+        }
     }
 
     #[test]
     fn test_nested() {
-        assert_eq!(with_new::<IntFam, _>(|arena| {
-            let r = with_new::<IntFam, _>(|arena2| {
+        assert_eq!({
+            let arena = & DropArena::new();
+            let mut b1 = arena.alloc(5);
+            let r = {
+
                 let arena1 = arena;
-                let mut b1 = arena1.alloc(5);
+                let arena2 = &DropArena::new();
                 let b2 = arena2.alloc(6);
                 *b1 += 100;
                 assert_eq!(arena1.box_to_inner(b1), 105);
-                // arena1.drop_box(b2); // Doesn't compile
+                // arena1.drop_box(b2); // Doesn't compile, even without the next line.
                 let r = arena2.box_to_inner(b2);
                 assert_eq!(arena2.len(), 0);
                 r
-            });
+            };
 
             assert_eq!(arena.len(), 0);
             r
-        }), 6);
+        }, 6);
+    }
+
+    #[test]
+    fn safe_overlap() {
+        let arena1 = &DropArena::new();
+        let arena2 = &DropArena::new();
+        let b1 = arena1.alloc("hello");
+        let b2 = arena2.alloc("goodbye");
+        arena1.drop_box(b2);
+        arena2.drop_box(b1);
     }
 }

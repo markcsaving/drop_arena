@@ -17,8 +17,11 @@ We can use the `DropArena::drop_box` method on a `DropBox` to drop the underlyin
 also use the `DropArena::box_to_inner` method to retrieve the underlying `T` from a `DropBox<T>` and reclaim the memory
 it used.
 
-To guarantee that an arena can only reclaim memory from `DropBox`es it allocated, we need to use continuation-passing
-style and lifetime magic. A `DropArena` is tagged with the lifetime it will live. 
+To guarantee that an arena can only reclaim memory from `DropBox`es it allocated (or one allocated by a drop arena with 
+exactly the same lifetime), we need to use lifetime magic. A `DropArena` is tagged with the lifetime it will live, and
+it has an invariant relationship with this lifetime. `DropBox`es have an invariant relationship with the lifetime of 
+the `DropArena` that created them. 
 
-How do we ensure the compiler doesn't assign two `DropArena`s the same dummy lifetime? We only allow use of the `DropArena` 
-through a continuation that can handle a `DropArena` with any dummy lifetime. 
+It is not recommended to have multiple `DropArena<T>`s with the same lifetime. In particular, if arena 1 keeps allocating
+`DropBox<T>`s which arena 2 keeps consuming, you won't get any benefit out of reclaiming the memory. However, it is 
+perfectly safe to do this.
