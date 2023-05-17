@@ -13,13 +13,12 @@
 use std::borrow::{Borrow, BorrowMut};
 use std::cell::Cell;
 use std::marker::PhantomData;
-use std::mem::{ManuallyDrop};
+use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::{mem, ptr};
 
 use typed_arena::Arena;
-
 
 /// An Item is either a free block, in which case it has a pointer to the next free block,
 /// or it is occupied by a `T`.
@@ -51,7 +50,8 @@ type Invariant<'b> = PhantomData<*mut &'b i32>;
 
 /// An owning pointer to a `T` which has been allocated with a [`DropArena<'arena, T>`].
 #[repr(transparent)]
-// safety: a [`DropBox<'arena, T>`] must be transmutable to a [`NonNull<Item<T>>`].
+// safety: a [`DropBox<'arena, T>`] must be transmutable to a [`&'arena mut T`]. *self.pointer
+// must be an `Item` in the `item` configuration, with an undropped `T`.
 pub struct DropBox<'arena, T> {
     pointer: &'arena mut Item<T>,
     _phantom: Invariant<'arena>,
@@ -62,6 +62,8 @@ impl<'arena, T> Deref for DropBox<'arena, T> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
+        // Safety: it's an invariant that self.pointer is always in the item configuration
+        // with an undropped T.
         unsafe { &self.pointer.item }
     }
 }
@@ -76,6 +78,8 @@ impl<'arena, T> Borrow<T> for DropBox<'arena, T> {
 impl<'arena, T> DerefMut for DropBox<'arena, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // Safety: it's an invariant that self.pointer is always in the item configuration
+        // with an undropped T.
         unsafe { &mut self.pointer.item }
     }
 }
@@ -113,7 +117,9 @@ impl<'arena, T> DropBox<'arena, T> {
     /// will the memory be returned to the runtime.
     #[inline]
     pub fn leak(self) -> &'arena mut T {
-        // Safety: we must use transmute to avoid violating stacked borrows.
+        // Safety: we must use transmute to avoid violating stacked borrows. We know `self` is a
+        // #[repr(transparent)] wrapper around `&'arena mut Item<T>`. Furthermore, we know that
+        // self.pointer points to an Item in the item configuration with an undropped T.
         unsafe {
             let item_ptr: &'arena mut Item<T> = mem::transmute(self);
             &mut item_ptr.item
@@ -160,20 +166,24 @@ impl<'arena, T> DropArena<'arena, T> {
     #[inline]
     pub fn drop_box(&'arena self, mut x: DropBox<'arena, T>) {
         // Safety: we don't use `x` to refer to `T` after calling `drop_inner`.
-        // Safety: we know `x` was allocated with `self` since the `'arena` lifetimes match.
         unsafe {
             x.drop_inner();
-            self.add_free_item(x);
         }
+        self.free_without_dropping(x);
     }
 
-    /// May only be called if `ptr` is a pointer to an `Item` allocated by `self.arena` and
-    /// `ptr` is not in the linked list of free items already.
+    /// Immediately frees up the memory the arena used to allocate the `DropBox<T>`, but without
+    /// calling `Drop::drop()` on the `T`.
     #[inline]
-    unsafe fn add_free_item(&'arena self, ptr: DropBox<'arena, T>) {
-        // safety: we need to use mem::transmute for the purposes of StackedBorrows
-        let mut ptr: NonNull<Item<T>> = mem::transmute(ptr);
-        ptr.as_mut().pointer = self.start.replace(Some(ptr))
+    pub fn free_without_dropping(&'arena self, ptr: DropBox<'arena, T>) {
+        unsafe {
+            // Safety: a DropBox<'arena, T> is representationally equivalent to a &'arena mut Item<T>,
+            // which is representationally equivalent to a NonNull<Item<T>>
+            let mut ptr: NonNull<Item<T>> = mem::transmute(ptr);
+            // Safety: ptr came from a mutable reference with a 'arena lifetime, so it's valid
+            // for that whole lifetime.
+            ptr.as_mut().pointer = self.start.replace(Some(ptr));
+        }
     }
 
     /// This function produces the underlying `T` from a [`DropBox<T>`], freeing the
@@ -182,7 +192,7 @@ impl<'arena, T> DropArena<'arena, T> {
     pub fn box_to_inner(&'arena self, mut x: DropBox<'arena, T>) -> T {
         unsafe {
             let result = x.take_inner();
-            self.add_free_item(x);
+            self.free_without_dropping(x);
             result
         }
     }
@@ -219,7 +229,7 @@ impl<'arena, T> DropArena<'arena, T> {
     /// Note that if this arena is calling [`DropArena::drop_box`] on boxes allocated by another
     /// [`DropArena`] of the same lifetime, the answer could be negative.
     #[inline]
-    pub fn len(&self) -> isize {
+    pub fn len(&'arena self) -> isize {
         let mut next = self.start.get();
         let mut count = 0;
         while let Some(ptr) = next {
@@ -230,6 +240,13 @@ impl<'arena, T> DropArena<'arena, T> {
         let len = self.arena.len();
         assert!(len <= isize::MAX as usize);
         (self.arena.len() as isize) - (count as isize)
+    }
+
+    /// Returns the highest value `self.len()` has ever been over the entire life of `self`
+    /// up until the moment this call is made.
+    #[inline]
+    pub fn max_len(&self) -> usize {
+        self.arena.len()
     }
 
     /// Produces a new `DropArena`.
@@ -249,6 +266,8 @@ impl<'arena, T> DropArena<'arena, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{random, thread_rng, Rng};
+    use std::num::Wrapping;
 
     struct Node<'arena, T> {
         item: T,
@@ -300,9 +319,6 @@ mod tests {
 
     #[test]
     fn test_linked_list() {
-
-
-
         let v1 = {
             let arena = &DropArena::new();
             let mut list = List::new(arena);
@@ -339,21 +355,21 @@ mod tests {
             }
 
             println!("Finished with Tester::use_arena");
-
         };
     }
 
     #[test]
     fn simple() {
         let arena = &DropArena::new();
-            let b = arena.alloc(5);
-            arena.drop_box(b);
-            let _b2 = arena.alloc(6);
+        let b = arena.alloc(5);
+        arena.drop_box(b);
+        let _b2 = arena.alloc(6);
     }
 
     #[test]
-    fn test_box_functions() {{
-        let arena = &DropArena::new();
+    fn test_box_functions() {
+        {
+            let arena = &DropArena::new();
             let b = arena.alloc(5);
             let r = b.leak();
             *r += 1;
@@ -364,25 +380,27 @@ mod tests {
 
     #[test]
     fn test_nested() {
-        assert_eq!({
-            let arena = & DropArena::new();
-            let mut b1 = arena.alloc(5);
-            let r = {
+        assert_eq!(
+            {
+                let arena = &DropArena::new();
+                let mut b1 = arena.alloc(5);
+                let r = {
+                    let arena1 = arena;
+                    let arena2 = &DropArena::new();
+                    let b2 = arena2.alloc(6);
+                    *b1 += 100;
+                    assert_eq!(arena1.box_to_inner(b1), 105);
+                    // arena1.drop_box(b2); // Doesn't compile, even without the next line.
+                    let r = arena2.box_to_inner(b2);
+                    assert_eq!(arena2.len(), 0);
+                    r
+                };
 
-                let arena1 = arena;
-                let arena2 = &DropArena::new();
-                let b2 = arena2.alloc(6);
-                *b1 += 100;
-                assert_eq!(arena1.box_to_inner(b1), 105);
-                // arena1.drop_box(b2); // Doesn't compile, even without the next line.
-                let r = arena2.box_to_inner(b2);
-                assert_eq!(arena2.len(), 0);
+                assert_eq!(arena.len(), 0);
                 r
-            };
-
-            assert_eq!(arena.len(), 0);
-            r
-        }, 6);
+            },
+            6
+        );
     }
 
     #[test]
@@ -393,5 +411,42 @@ mod tests {
         let b2 = arena2.alloc("goodbye");
         arena1.drop_box(b2);
         arena2.drop_box(b1);
+    }
+
+    fn pop_random<T>(vec: &mut Vec<T>) -> T {
+        assert!(!vec.is_empty());
+        let idx = thread_rng().gen_range(0..vec.len());
+        let max = vec.len() - 1;
+        vec.swap(idx, max);
+        vec.pop().unwrap()
+    }
+
+    #[test]
+    fn test_random() {
+        let max_len = 300;
+        let min_len = 100;
+        let start = (min_len + max_len) / 2;
+
+        let arena: DropArena<[Wrapping<usize>; 3]> = DropArena::new();
+        let mut vec = Vec::with_capacity(max_len);
+        let mut sum: Wrapping<usize> = Wrapping(0);
+        for _ in 0..((min_len + max_len) / 2) {
+            vec.push(arena.alloc(random()));
+        }
+
+        for _ in 0..(5 * start) {
+            let l = vec.len();
+            if l == max_len || (l != min_len && random()) {
+                sum += arena
+                    .box_to_inner(pop_random(&mut vec))
+                    .into_iter()
+                    .sum::<Wrapping<usize>>();
+            } else {
+                vec.push(arena.alloc(random()));
+            };
+        }
+
+        assert!(sum.0 > 0); // This has only a (1 / (1 + usize::MAX)) chance of failing.
+        assert!(arena.max_len() <= max_len);
     }
 }

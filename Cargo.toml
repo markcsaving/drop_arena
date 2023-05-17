@@ -11,6 +11,7 @@ typed-arena = "2.0.2"
 
 [dev-dependencies]
 criterion = "0.4"
+rand = "0.8.5"
 
 [[bench]]
 name = "arena_vs_box"

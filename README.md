@@ -27,3 +27,25 @@ the `DropArena` that created them.
 It is not recommended to have multiple `DropArena<T>`s with the same lifetime. In particular, if arena 1 keeps allocating
 `DropBox<T>`s which arena 2 keeps consuming, you won't get any benefit out of reclaiming the memory. However, it is 
 perfectly safe to do this.
+
+# Complexity
+
+Calling `DropArena::box_to_inner()` or `DropBox::into_inner()` is O(1) with very small constants (except if 
+`size_of::<T>()` is large - then copying the `T` dominates). The corresponding `drop` functions are also O(1) + the 
+time the call to `T::drop` takes with small constants.
+
+Allocating is also very fast. There are three possible paths for an allocation. First, the arena has a free space where
+something was previously allocated. In this case, allocation is O(1) with small constants. Second, the preallocated
+capacity of the Arena is large enough to fit one more element. In this case, allocation is O(1) with small constants.
+Third, the arena has genuinely run out of space (this is the most uncommon case, even when we are only doing allocations
+and no drops). In this case, we must allocate more space using the system allocator. We follow the same guidelines as 
+`typed_arena`, making a single allocation with enough space for many more `T`s (in fact, we actually implement 
+`DropArena` using `typed_arena::Arena`). 
+
+# Areas of Improvement
+This allocator works for zero-sized types, but it is not efficient in this case. I plan to address this in the future 
+using conditional types. The issue is that keeping a free block list requires pointers. However, in theory, when we are
+dealing with ZSTs, we could just choose not to have a free list at all.
+
+Much more testing is required to ensure that `DropArena`s are safe. I've done some elementary experimentation with Miri,
+but exhaustive fuzzing and 
