@@ -1,5 +1,7 @@
+# Introduction 
 A `DropArena<T>` can allocate or deallocate individual elements of type `T`. Only allocating elements of a fixed size 
 and alignment allows the allocator to be extremely efficient compared to an ordinary implementation of `malloc` and `free`.
+Think of `DropArena` as providing a combination of the functionality of an `Arena` and the allocator that makes `Box`es.
 
 The `DropArena` can return a `DropBox<T>`, which functions very much like a `Box<T>` except for being tied to the 
 `DropArena` that allocated it. A `DropBox` can be used exactly like a `&mut T`; in fact, it is a `repr(transparent)`

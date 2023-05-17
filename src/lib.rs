@@ -6,11 +6,9 @@
 //!
 //! By contrast, a [`DropArena<T>`] allocates a `T` and returns a [`DropBox<T>`]. As the
 //! name suggests, a [`DropBox<T>`] is very similar to a [`Box<T>`]. While a [`Box<T>`] is tied to the
-//! single global allocator, a [`DropBox<T>`] is tied to the [`DropArena`] which allocated it. A
+//! single global allocator, a [`DropBox<T>`] is tied to the lifetime of the [`DropArena`] which allocated it. A
 //! [`DropBox<T>`] can be consumed by its creator [`DropArena<T>`], which frees up the memory so that the
 //! [`DropArena<T>`] can reuse it on another allocation and either returns or drops the underlying `T`.
-//!
-//! In order to expose a safe API, it is necessary
 
 use std::borrow::{Borrow, BorrowMut};
 use std::cell::Cell;

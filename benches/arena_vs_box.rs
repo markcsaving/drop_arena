@@ -40,14 +40,14 @@ pub fn alloc_drop(c: &mut Criterion) {
     group.bench_function("dropbox", |b| b.iter(|| {
         let arena = DropArena::new();
         for i in 0..500 {
-            std::hint::black_box(arena.alloc(i));
+            std::hint::black_box((&arena, arena.alloc(i)));
         }
     }));
 
     group.bench_function("typed-arena-ref", |b| b.iter(|| {
         let arena = Arena::new();
         for i in 0..500 {
-            std::hint::black_box(arena.alloc(i));
+            std::hint::black_box((&arena, arena.alloc(i)));
         }
     }));
 
