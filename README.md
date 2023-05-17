@@ -45,7 +45,9 @@ and no drops). In this case, we must allocate more space using the system alloca
 # Areas of Improvement
 This allocator works for zero-sized types, but it is not efficient in this case. I plan to address this in the future 
 using conditional types. The issue is that keeping a free block list requires pointers. However, in theory, when we are
-dealing with ZSTs, we could just choose not to have a free list at all.
+dealing with ZSTs, we could just choose not to have a free list at all. I would like to separately implement a special
+arena for ZSTs using [CondType](https://github.com/nvzqz/condtype), but this crate is still limited. In order for it to be usable here, we need
+[this issue](https://github.com/rust-lang/project-const-generics/issues/26) to be resolved.
 
 Much more testing is required to ensure that `DropArena`s are safe. I've done some elementary experimentation with Miri,
-but exhaustive fuzzing and 
+but exhaustive fuzzing is needed.
