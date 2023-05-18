@@ -1,22 +1,25 @@
 #![warn(missing_docs)]
+#![cfg_attr(not(test), no_std)]
+// This crate provides a custom allocator that can allocate items of a single type, much like
+// [typed-arena](https://docs.rs/crate/typed-arena/latest). A [`Arena<T>`] allocates
+// a `T` and returns a `&mut T`; the `T` will be dropped when the arena itself goes out of scope.
+//
+// By contrast, a [`DropArena<T>`] allocates a `T` and returns a [`DropBox<T>`]. As the
+// name suggests, a [`DropBox<T>`] is very similar to a [`Box<T>`]. While a [`Box<T>`] is tied to the
+// single global allocator, a [`DropBox<T>`] is tied to the lifetime of the [`DropArena`] which allocated it. A
+// [`DropBox<T>`] can be consumed by its creator [`DropArena<T>`], which frees up the memory so that the
+// [`DropArena<T>`] can reuse it on another allocation and either returns or drops the underlying `T`.
 
-//! This crate provides a custom allocator that can allocate items of a single type, much like
-//! [typed-arena](https://docs.rs/crate/typed-arena/latest). A `typed_arena::Arena<T>` allocates
-//! a `T` and returns a `&mut T`; the `T` will be dropped when the arena itself goes out of scope.
-//!
-//! By contrast, a [`DropArena<T>`] allocates a `T` and returns a [`DropBox<T>`]. As the
-//! name suggests, a [`DropBox<T>`] is very similar to a [`Box<T>`]. While a [`Box<T>`] is tied to the
-//! single global allocator, a [`DropBox<T>`] is tied to the lifetime of the [`DropArena`] which allocated it. A
-//! [`DropBox<T>`] can be consumed by its creator [`DropArena<T>`], which frees up the memory so that the
-//! [`DropArena<T>`] can reuse it on another allocation and either returns or drops the underlying `T`.
+#![doc = include_str!("../README.md")]
 
-use std::borrow::{Borrow, BorrowMut};
-use std::cell::Cell;
-use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
-use std::ops::{Deref, DerefMut};
-use std::ptr::NonNull;
-use std::{mem, ptr};
+
+use core::borrow::{Borrow, BorrowMut};
+use core::cell::Cell;
+use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
+use core::ops::{Deref, DerefMut};
+use core::ptr::NonNull;
+use core::{mem, ptr};
 
 use typed_arena::Arena;
 
@@ -48,7 +51,7 @@ impl<T> Item<T> {
 /// A ZST which invariantly depends on `'b`.
 type Invariant<'b> = PhantomData<*mut &'b i32>;
 
-/// An owning pointer to a `T` which has been allocated with a [`DropArena<'arena, T>`].
+/// An owning pointer to a `T` which has been allocated with a `DropArena<'arena, T>`.
 #[repr(transparent)]
 // safety: a [`DropBox<'arena, T>`] must be transmutable to a [`&'arena mut T`]. *self.pointer
 // must be an `Item` in the `item` configuration, with an undropped `T`.
@@ -93,8 +96,9 @@ impl<'arena, T> BorrowMut<T> for DropBox<'arena, T> {
 
 impl<'arena, T> DropBox<'arena, T> {
     /// Safety: after this function is called, we can't use our [`DropBox`] as a reference to
-    /// the underlying `T` again. This includes not calling [`drop`] on `self`, even if the
-    /// call to `drop_inner` panics.
+    /// the underlying `T` again. This includes not calling [`DropBox::drop`] on `self`. Warning: this
+    /// function can panic, but this function panicking doesn't relieve the caller of its
+    /// obligations not to use `self` again as a reference to `T`, including via [`drop`].
     #[inline]
     unsafe fn drop_inner(&mut self) {
         ptr::drop_in_place::<T>(self.deref_mut())
@@ -145,10 +149,8 @@ impl<'a, T> Drop for DropBox<'a, T> {
     }
 }
 
-/// Our `DropArena` depends invariantly on the lifetime `'arena`. This allows us to ensure that
-/// the memory allocated to a `DropBox` can only be reclaimed by the `DropArena` that created it,
-/// since only that `DropArena` can be proved by the compiler to have the same `'arena` lifetime
-/// parameter.
+/// Our `DropArena` depends invariantly on its own lifetime `'arena`. This allows us to ensure
+/// that `DropBox`s are collected by their corresponding `DropArena`s.
 ///
 /// Note that `DropArena` is currently inefficient but functional for ZSTs. I don't know why you'd
 /// want to use it for ZSTs, but if you do, be aware `DropArena` will allocate in this case.
@@ -162,7 +164,7 @@ pub struct DropArena<'arena, T> {
 
 impl<'arena, T> DropArena<'arena, T> {
     /// This function drops the underlying `T` in place and frees the memory. Note that
-    /// calling `std::mem::drop(x)` will drop the underlying `T` but will *not* free the memory
+    /// calling `core::mem::drop(x)` will drop the underlying `T` but will *not* free the memory
     /// used to allocate the `T`; the memory will eventually be freed when we drop the `DropArena`.
     #[inline]
     pub fn drop_box(&'arena self, x: DropBox<'arena, T>) {
@@ -252,25 +254,32 @@ impl<'arena, T> DropArena<'arena, T> {
         self.arena.len()
     }
 
-    /// Produces a new `DropArena`.
+    /// Produces a new [`DropArena`] with the default size (around 1024 bytes of capacity).
     #[inline]
     pub fn new() -> Self {
         Self::from_arena(Arena::new())
     }
 
-    /// Exactly like [`Self::new`], except that we allocate a fixed starting capacity. Prefer
-    /// to use [`with_capacity`].
+    /// Exactly like [`Self::new`], except that we allocate a fixed starting capacity. Here,
+    /// `n` is the number of elements we store. Be aware that calling this with `n = 0` is exactly
+    /// the same as calling it with `n = 1`; we heap-allocate in either case.
     #[inline]
-    pub fn new_with_capacity(n: usize) -> Self {
+    pub fn with_capacity(n: usize) -> Self {
         Self::from_arena(Arena::with_capacity(n))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(no_std)]
+    extern crate alloc;
+    #[cfg(no_std)]
+    use alloc::vec;
+    #[cfg(no_std)]
+    use alloc::vec::Vec;
     use super::*;
     use rand::{random, thread_rng, Rng};
-    use std::num::Wrapping;
+    use core::num::Wrapping;
     use std::panic::catch_unwind;
 
     struct Node<'arena, T> {
@@ -455,7 +464,9 @@ mod tests {
     }
 
     #[test]
-    fn ub() {
+    /// This test should be run with Miri. The purpose is to make sure that panicking [`Drop`]
+    /// implementations don't cause undefined behaviour.
+    fn catch_panic() {
         struct Dropping;
 
         impl Drop for Dropping {
@@ -468,6 +479,8 @@ mod tests {
         let arena = &DropArena::new();
         let b = arena.alloc(Dropping);
 
-        catch_unwind(std::panic::AssertUnwindSafe( || arena.drop_box(b))).unwrap_err();
+        catch_unwind(core::panic::AssertUnwindSafe( || arena.drop_box(b))).unwrap_err();
+        let b = arena.alloc(Dropping);
+        catch_unwind(core::panic::AssertUnwindSafe(|| drop(b))).unwrap_err();
     }
 }
