@@ -93,7 +93,8 @@ impl<'arena, T> BorrowMut<T> for DropBox<'arena, T> {
 
 impl<'arena, T> DropBox<'arena, T> {
     /// Safety: after this function is called, we can't use our [`DropBox`] as a reference to
-    /// the underlying `T` again. This includes not calling [`drop`] on `self`.
+    /// the underlying `T` again. This includes not calling [`drop`] on `self`, even if the
+    /// call to `drop_inner` panics.
     #[inline]
     unsafe fn drop_inner(&mut self) {
         ptr::drop_in_place::<T>(self.deref_mut())
@@ -164,16 +165,18 @@ impl<'arena, T> DropArena<'arena, T> {
     /// calling `std::mem::drop(x)` will drop the underlying `T` but will *not* free the memory
     /// used to allocate the `T`; the memory will eventually be freed when we drop the `DropArena`.
     #[inline]
-    pub fn drop_box(&'arena self, mut x: DropBox<'arena, T>) {
-        // Safety: we don't use `x` to refer to `T` after calling `drop_inner`.
+    pub fn drop_box(&'arena self, x: DropBox<'arena, T>) {
+        // Wrapping x in a ManuallyDrop prevents us from running into issues if `T::drop` panics.
+        // If `T::drop` does panic, the spot the `T` occupied will be leaked.
+        let mut x = ManuallyDrop::new(x);
         unsafe {
-            x.drop_inner();
-        }
-        self.free_without_dropping(x);
+            x.deref_mut().drop_inner()
+        };
+        self.free_without_dropping(ManuallyDrop::into_inner(x))
     }
 
-    /// Immediately frees up the memory the arena used to allocate the `DropBox<T>`, but without
-    /// calling `Drop::drop()` on the `T`.
+    /// Immediately frees up the memory the arena used to allocate the [`DropBox<T>`], but without
+    /// calling [`Drop::drop()`] on the `T`. It is the "opposite"
     #[inline]
     pub fn free_without_dropping(&'arena self, ptr: DropBox<'arena, T>) {
         unsafe {
@@ -268,6 +271,7 @@ mod tests {
     use super::*;
     use rand::{random, thread_rng, Rng};
     use std::num::Wrapping;
+    use std::panic::catch_unwind;
 
     struct Node<'arena, T> {
         item: T,
@@ -448,5 +452,22 @@ mod tests {
 
         assert!(sum.0 > 0); // This has only a (1 / (1 + usize::MAX)) chance of failing.
         assert!(arena.max_len() <= max_len);
+    }
+
+    #[test]
+    fn ub() {
+        struct Dropping;
+
+        impl Drop for Dropping {
+            fn drop(&mut self) {
+                println!("Dropping!");
+                panic!("panic in Dropping::drop")
+            }
+        }
+
+        let arena = &DropArena::new();
+        let b = arena.alloc(Dropping);
+
+        catch_unwind(std::panic::AssertUnwindSafe( || arena.drop_box(b))).unwrap_err();
     }
 }
