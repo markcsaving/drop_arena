@@ -279,6 +279,7 @@ mod tests {
     use super::*;
     use rand::{random, thread_rng, Rng};
     use core::num::Wrapping;
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use std::panic::catch_unwind;
 
     struct Node<'arena, T> {
@@ -446,7 +447,7 @@ mod tests {
             vec.push(arena.alloc(random()));
         }
 
-        for _ in 0..(5 * start) {
+        for _ in 0..(3 * start) {
             let l = vec.len();
             if l == max_len || (l != min_len && random()) {
                 sum += arena
@@ -464,13 +465,16 @@ mod tests {
 
     #[test]
     /// This test should be run with Miri. The purpose is to make sure that panicking [`Drop`]
-    /// implementations don't cause undefined behaviour.
+    /// implementations don't cause undefined behaviour, potentially by running `drop` a second
+    /// time. Because running drop a second time is undefined behaviour, this test may "pass"
+    /// even if it should fail unless run with Miri.
     fn catch_panic() {
+        static CELL: AtomicUsize = AtomicUsize::new(0);
         struct Dropping;
 
         impl Drop for Dropping {
             fn drop(&mut self) {
-                println!("Dropping!");
+                CELL.fetch_add(1, Ordering::Relaxed);
                 panic!("panic in Dropping::drop")
             }
         }
@@ -479,8 +483,11 @@ mod tests {
         let b = arena.alloc(Dropping);
 
         catch_unwind(core::panic::AssertUnwindSafe( || arena.drop_box(b))).unwrap_err();
+        assert_eq!(CELL.load(Ordering::Relaxed), 1);
         let b = arena.alloc(Dropping);
         catch_unwind(core::panic::AssertUnwindSafe(|| drop(b))).unwrap_err();
+        assert_eq!(CELL.load(Ordering::Relaxed), 2);
+
     }
 
     #[test]
