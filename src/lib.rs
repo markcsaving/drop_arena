@@ -168,7 +168,7 @@ impl<'arena, T> DropBox<'arena, T> {
 
     /// This function returns the underlying `T` without freeing the memory used to allocate
     /// the `T`. The memory used to allocate the underlying `T` will be freed when the underlying
-    /// `DropArena` is freed. To also free the memory, see `DropArena::box_to_inner`.
+    /// [`DropArena`] is freed. To also free the memory, see [`DropArena::box_to_inner`].
     ///
     /// # Example
     /// ```
@@ -268,7 +268,7 @@ impl<'arena, T> DropArena<'arena, T> {
     /// calling [`core::mem::drop(x)`] will drop the underlying `T` but will *not* free the memory
     /// used to allocate the `T`; the memory will eventually be freed when we drop the [`DropArena`].
     ///
-    /// Note that calling [`drop_box`] is more efficient than dropping the result of [`box_to_inner`].
+    /// Note that calling [`Self::drop_box`] is more efficient than dropping the result of [`Self::box_to_inner`].
     /// It may be difficult or impossible for the compiler to optimize the latter into the former.
     ///
     /// # Example
