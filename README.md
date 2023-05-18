@@ -50,4 +50,5 @@ arena for ZSTs using [CondType](https://github.com/nvzqz/condtype), but this cra
 [this issue](https://github.com/rust-lang/project-const-generics/issues/26) to be resolved.
 
 Much more testing is required to ensure that [`DropArena`]s are safe. I've done some elementary experimentation with Miri,
-but exhaustive fuzzing is needed.
+but exhaustive fuzzing is needed. This code uses a fair amount of `unsafe`, and that means there are plenty of chances for 
+serious bugs to appear. I think I've caught most of them, but it's not impossible I neglected one.

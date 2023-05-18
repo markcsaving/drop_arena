@@ -163,8 +163,11 @@ pub struct DropArena<'arena, T> {
 
 impl<'arena, T> DropArena<'arena, T> {
     /// This function drops the underlying `T` in place and frees the memory. Note that
-    /// calling `core::mem::drop(x)` will drop the underlying `T` but will *not* free the memory
-    /// used to allocate the `T`; the memory will eventually be freed when we drop the `DropArena`.
+    /// calling [`core::mem::drop(x)`] will drop the underlying `T` but will *not* free the memory
+    /// used to allocate the `T`; the memory will eventually be freed when we drop the [`DropArena`].
+    ///
+    /// Note that calling [`drop_box`] is more efficient than dropping the result of [`box_to_inner`].
+    /// It may be difficult or impossible for the compiler to optimize the latter into the former.
     #[inline]
     pub fn drop_box(&'arena self, x: DropBox<'arena, T>) {
         // SAFETY: Wrapping x in a ManuallyDrop prevents us from running into issues if `T::drop` panics.
@@ -232,7 +235,6 @@ impl<'arena, T> DropArena<'arena, T> {
     /// deallocated. This function is slow, so it should only be called infrequently.
     /// Note that if this arena is calling [`DropArena::drop_box`] on boxes allocated by another
     /// [`DropArena`] of the same lifetime, the answer could be negative.
-    #[inline]
     pub fn len(&'arena self) -> isize {
         let mut next = self.start.get();
         let mut count = 0;
@@ -298,6 +300,7 @@ mod tests {
         fn drop(&mut self) {
             while let Some(mut nxt) = self.ptr.take() {
                 self.ptr = nxt.rest.take();
+                self.arena.drop_box(nxt);
             }
         }
     }
@@ -352,20 +355,23 @@ mod tests {
                 list.push(i);
             }
 
-            assert_eq!(arena.arena.len(), 100);
+            assert_eq!(arena.max_len(), 100);
             assert_eq!(arena.len(), 100);
 
             for i in (50..100).rev() {
                 assert_eq!(i, list.pop().unwrap());
                 assert_eq!(arena.len(), i);
-                assert_eq!(arena.arena.len(), 100);
+                assert_eq!(arena.max_len(), 100);
             }
 
             for i in 50..100 {
                 list.push(i);
                 assert_eq!(arena.len(), i + 1);
-                assert_eq!(arena.arena.len(), 100);
+                assert_eq!(arena.max_len(), 100);
             }
+
+            drop(list);
+            assert_eq!(arena.len(), 0);
 
             println!("Finished with Tester::use_arena");
         };
