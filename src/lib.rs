@@ -11,6 +11,68 @@
 // [`DropArena<T>`] can reuse it on another allocation and either returns or drops the underlying `T`.
 #![doc = include_str!("../README.md")]
 
+//! # Recursive owning data structures
+//!
+//! We can write some basic owning data structures using our arena as follows. The list implementation
+//! below is inspired by [Learning Rust With Entirely Too Many Linked Lists](https://rust-unofficial.github.io/too-many-lists/index.html).
+//!
+//! ```
+//! use drop_arena::{DropArena, DropBox};
+//! struct Node<'arena, T> {
+//!     item: T,
+//!     rest: Link<'arena, T>,
+//! }
+//!
+//! type Link<'arena, T> = Option<DropBox<'arena, Node<'arena, T>>>;
+//!
+//! struct List<'arena, T> {
+//!     arena: &'arena DropArena<'arena, Node<'arena, T>>,
+//!     ptr: Link<'arena, T>,
+//! }
+//!
+//! impl<'arena, T> Drop for List<'arena, T> {
+//!     fn drop(&mut self) {
+//!         while let Some(mut nxt) = self.ptr.take() {
+//!             self.ptr = nxt.rest.take();
+//!             self.arena.drop_box(nxt);
+//!         }
+//!     }
+//! }
+//!
+//! impl<'d, T> List<'d, T> {
+//!     fn push(&mut self, val: T) {
+//!         self.ptr = Some(self.arena.alloc(Node {
+//!             item: val,
+//!             rest: self.ptr.take(),
+//!         }))
+//!     }
+//!
+//!     fn pop(&mut self) -> Option<T> {
+//!         let first = self.ptr.take()?;
+//!         let node = self.arena.box_to_inner(first);
+//!         self.ptr = node.rest;
+//!         Some(node.item)
+//!     }
+//!
+//!     fn new(arena: &'d DropArena<'d, Node<'d, T>>) -> Self {
+//!         Self { arena, ptr: None }
+//!     }
+//! }
+//!
+//!
+//! let arena = DropArena::new();
+//! let mut list = List::new(&arena);
+//!
+//! for i in 0..100 {
+//!     list.push(i);
+//! }
+//!
+//! for i in (0..100).rev() {
+//!     assert_eq!(list.pop(), i);
+//! }
+//! ```
+
+
 use core::borrow::{Borrow, BorrowMut};
 use core::cell::Cell;
 use core::marker::PhantomData;
@@ -20,6 +82,8 @@ use core::ptr::NonNull;
 use core::{mem, ptr};
 
 use typed_arena::Arena;
+
+
 
 /// An Item is either a free block, in which case it has a pointer to the next free block,
 /// or it is occupied by a `T`.
