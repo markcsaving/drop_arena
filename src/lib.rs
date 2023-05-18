@@ -2,7 +2,7 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 // After modifying the below, please make sure to run
-// $ cargo readme > README.md
+// $ cargo readme > README-utf16.md
 //! # Introduction
 //! A [`DropArena<T>`] can allocate or deallocate individual elements of type `T`. Only allocating elements of a fixed size
 //!! and alignment allows the allocator to be extremely efficient compared to an ordinary implementation of `malloc` and `free`.
