@@ -149,8 +149,9 @@ impl<'a, T> Drop for DropBox<'a, T> {
     }
 }
 
-/// Our `DropArena` depends invariantly on its own lifetime `'arena`. This allows us to ensure
-/// that `DropBox`s are collected by their corresponding `DropArena`s.
+/// Our [`DropArena`] depends invariantly on its own lifetime `'arena`. This allows us to ensure
+/// that [`DropBox`]s are collected by their corresponding [`DropArena`]s (or those of exactly
+/// the same lifetime, which is safe but inefficient).
 ///
 /// Note that `DropArena` is currently inefficient but functional for ZSTs. I don't know why you'd
 /// want to use it for ZSTs, but if you do, be aware `DropArena` will allocate in this case.
@@ -160,15 +161,13 @@ pub struct DropArena<'arena, T> {
     _phantom: Invariant<'arena>,
 }
 
-// TODO: make `DropArena` work efficiently on ZSTs.
-
 impl<'arena, T> DropArena<'arena, T> {
     /// This function drops the underlying `T` in place and frees the memory. Note that
     /// calling `core::mem::drop(x)` will drop the underlying `T` but will *not* free the memory
     /// used to allocate the `T`; the memory will eventually be freed when we drop the `DropArena`.
     #[inline]
     pub fn drop_box(&'arena self, x: DropBox<'arena, T>) {
-        // Wrapping x in a ManuallyDrop prevents us from running into issues if `T::drop` panics.
+        // SAFETY: Wrapping x in a ManuallyDrop prevents us from running into issues if `T::drop` panics.
         // If `T::drop` does panic, the spot the `T` occupied will be leaked.
         let mut x = ManuallyDrop::new(x);
         unsafe {
@@ -178,7 +177,7 @@ impl<'arena, T> DropArena<'arena, T> {
     }
 
     /// Immediately frees up the memory the arena used to allocate the [`DropBox<T>`], but without
-    /// calling [`Drop::drop()`] on the `T`. It is the "opposite"
+    /// calling [`Drop::drop()`] on the `T`. It is the "opposite" of [`DropBox::leak`].
     #[inline]
     pub fn free_without_dropping(&'arena self, ptr: DropBox<'arena, T>) {
         unsafe {
@@ -482,5 +481,16 @@ mod tests {
         catch_unwind(core::panic::AssertUnwindSafe( || arena.drop_box(b))).unwrap_err();
         let b = arena.alloc(Dropping);
         catch_unwind(core::panic::AssertUnwindSafe(|| drop(b))).unwrap_err();
+    }
+
+    #[test]
+    fn len_error() {
+        let arena1 = &DropArena::new();
+        {
+            let arena2 = &DropArena::new();
+            let b = arena2.alloc(1);
+            arena1.drop_box(b);
+        }
+        // arena1.len() // this line must not compile
     }
 }
