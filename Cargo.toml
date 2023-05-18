@@ -7,11 +7,17 @@ readme = "README.md"
 license = "MIT"
 description = "A single-type allocator which permits dropping and reclaiming of individual elements"
 repository = "https://github.com/markcsaving/drop_arena"
+categories = ["memory-management", "no-std"]
+keywords = ["arena"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 typed-arena = "2.0.2"
+
+[features]
+default = ["std"]
+std = []
 
 [dev-dependencies]
 criterion = "0.4"
