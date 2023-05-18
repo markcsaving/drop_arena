@@ -1,16 +1,50 @@
 #![warn(missing_docs)]
 #![cfg_attr(not(test), no_std)]
-// This crate provides a custom allocator that can allocate items of a single type, much like
-// [typed-arena](https://docs.rs/crate/typed-arena/latest). A [`Arena<T>`] allocates
-// a `T` and returns a `&mut T`; the `T` will be dropped when the arena itself goes out of scope.
-//
-// By contrast, a [`DropArena<T>`] allocates a `T` and returns a [`DropBox<T>`]. As the
-// name suggests, a [`DropBox<T>`] is very similar to a [`Box<T>`]. While a [`Box<T>`] is tied to the
-// single global allocator, a [`DropBox<T>`] is tied to the lifetime of the [`DropArena`] which allocated it. A
-// [`DropBox<T>`] can be consumed by its creator [`DropArena<T>`], which frees up the memory so that the
-// [`DropArena<T>`] can reuse it on another allocation and either returns or drops the underlying `T`.
-#![doc = include_str!("../README.md")]
 
+//! # Introduction
+//! A [`DropArena<T>`] can allocate or deallocate individual elements of type `T`. Only allocating elements of a fixed size
+//!! and alignment allows the allocator to be extremely efficient compared to an ordinary implementation of `malloc` and `free`.
+//! Think of [`DropArena`] as providing a combination of the functionality of an [`Arena`] and the allocator that makes Boxes.
+//! 
+//! The [`DropArena`] can return a [`DropBox<T>`], which functions very much like a `Box<T>` except for being tied to the 
+//! [`DropArena`] that allocated it. A [`DropBox`] can be used exactly like a [`&mut T`]; in fact, it is a `repr(transparent)`
+//! wrapper around a [`&mut T`]. 
+//! 
+//! When it comes to getting rid of a [`DropBox<T>`], there are several options. First, you may use [`drop`] (or let the 
+//! [`DropBox`] go out of scope). This will call [`drop`] on the underlying `T`, but it will *not* reclaim the memory needed
+//! to allocate the `T`. Similarly, you may use [`DropBox::into_inner`], which extracts the underlying `T` but does not reclaim
+//! the memory the `T` formerly occupied. This memory will eventually be reclaimed when the [`DropArena<T>`] is itself dropped.
+//! Finally, you may call [`DropBox::leak`], which produces a [`&mut T`]. This means that unless unsafe code is used, the `T` will
+//! never be [`drop`]ed. However, when the [`DropArena`] which allocated the [`DropBox`] is dropped, the memory will be reclaimed.
+//! 
+//! In order to reclaim the memory allocated to a [`DropBox<T>`, we need a reference to the [`DropArena<T>`] which allocated it.
+//! We can use the [`DropArena::drop_box`] method on a [`DropBox`] to drop the underlying value and reclaim the memory. We can 
+//! also use the [`DropArena::box_into_inner`] method to retrieve the underlying `T` from a [`DropBox<T>`] and reclaim the memory
+//! it used.
+//! 
+//! To guarantee that an arena can only reclaim memory from [`DropBox`]es it allocated (or one allocated by a drop arena with 
+//! exactly the same lifetime), we need to use lifetime magic. A [`DropArena`] is tagged with the lifetime it will live, and
+//! it has an invariant relationship with this lifetime. [`DropBox`]es have an invariant relationship with the lifetime of 
+//! the [`DropArena`] that created them. 
+//! 
+//! It is not recommended to have multiple [`DropArena<T>`]s with the same lifetime. In particular, if arena 1 keeps allocating
+//! [`DropBox<T>`]s which arena 2 keeps consuming, you won't get any benefit out of reclaiming the memory. However, it is 
+//! perfectly safe to do this.
+//! 
+//! # Complexity
+//! 
+//! Calling [`DropArena::box_into_inner()`] or [`DropBox::into_inner()`] is O(1) with very small constants (except if 
+//! the size of `T` is large - then copying the `T` dominates). The corresponding [`drop`] functions are also O(1) + the 
+//! time the call to [`Drop::drop`] takes with small constants.
+//! 
+//! Allocating is also very fast. There are three possible paths for an allocation. First, the arena has a free space where
+//! something was previously allocated. In this case, allocation is O(1) with small constants. Second, the preallocated
+//! capacity of the Arena is large enough to fit one more element. In this case, allocation is O(1) with small constants.
+//! Third, the arena has genuinely run out of space (this is the most uncommon case, even when we are only doing allocations
+//! and no drops). In this case, we must allocate more space using the system allocator. We follow the same guidelines as 
+//! [`typed_arena`], making a single allocation with enough space for many more `T`s (in fact, we actually implement 
+//! [`DropArena`] using [`typed_arena`]).
+//!
 //! # Recursive owning data structures
 //!
 //! We can write some basic owning data structures using our arena as follows. The list implementation
@@ -49,7 +83,7 @@
 //!
 //!     fn pop(&mut self) -> Option<T> {
 //!         let first = self.ptr.take()?;
-//!         let node = self.arena.box_to_inner(first);
+//!         let node = self.arena.box_into_inner(first);
 //!         self.ptr = node.rest;
 //!         Some(node.item)
 //!     }
@@ -71,6 +105,25 @@
 //!     assert_eq!(list.pop(), i);
 //! }
 //! ```
+//! 
+//! # Areas of Improvement
+//!
+//! This allocator works for zero-sized types, but it is not efficient in this case. I plan to address this in the future 
+//! using conditional types. The issue is that keeping a free block list requires pointers. However, in theory, when we are
+//! dealing with ZSTs, we could just choose not to have a free list at all. I would like to separately implement a special
+//! arena for ZSTs using [CondType](https://!github.com/nvzqz/condtype), but this crate is still limited. In order for it to be usable here, we need
+//! [this issue](https://!github.com/rust-lang/project-const-generics/issues/26) to be resolved.
+//! 
+//! Much more testing is required to ensure that [`DropArena`]s are safe. I've done some elementary experimentation with Miri,
+//! but exhaustive fuzzing is needed. This code uses a fair amount of `unsafe`, and that means there are plenty of chances for 
+//! serious bugs to appear. I think I've caught most of them, but it's not impossible I neglected one.
+//!
+//! Making sure that a [`DropBox<T>`] implements all the traits that a `Box<T>` does seems desirable.
+//!
+//! # Maintenance
+//!
+//! This is my first open-source project, so I may not be able to find time to properly maintain it.
+//! That said, I will do my best, time-permitting, especially for serious bugs. Please be patient.
 
 
 use core::borrow::{Borrow, BorrowMut};
@@ -168,7 +221,7 @@ impl<'arena, T> DropBox<'arena, T> {
 
     /// This function returns the underlying `T` without freeing the memory used to allocate
     /// the `T`. The memory used to allocate the underlying `T` will be freed when the underlying
-    /// [`DropArena`] is freed. To also free the memory, see [`DropArena::box_to_inner`].
+    /// [`DropArena`] is freed. To also free the memory, see [`DropArena::box_into_inner`].
     ///
     /// # Example
     /// ```
@@ -268,7 +321,7 @@ impl<'arena, T> DropArena<'arena, T> {
     /// calling [`core::mem::drop(x)`] will drop the underlying `T` but will *not* free the memory
     /// used to allocate the `T`; the memory will eventually be freed when we drop the [`DropArena`].
     ///
-    /// Note that calling [`Self::drop_box`] is more efficient than dropping the result of [`Self::box_to_inner`].
+    /// Note that calling [`Self::drop_box`] is more efficient than dropping the result of [`Self::box_into_inner`].
     /// It may be difficult or impossible for the compiler to optimize the latter into the former.
     ///
     /// # Example
@@ -339,13 +392,13 @@ impl<'arena, T> DropArena<'arena, T> {
     /// let arena = DropArena::new();
     /// let string: String = "hello".to_string();
     /// let string: DropBox<String> = arena.alloc(string);
-    /// let string: String = arena.box_to_inner(string);
+    /// let string: String = arena.box_into_inner(string);
     /// // The arena is now free to reuse the slot that `string` took up.
     /// # assert_eq!(arena.len(), 0);
     /// # assert_eq!(string, "hello");
     /// ```
     #[inline]
-    pub fn box_to_inner(&'arena self, mut x: DropBox<'arena, T>) -> T {
+    pub fn box_into_inner(&'arena self, mut x: DropBox<'arena, T>) -> T {
         unsafe {
             let result = x.take_inner();
             self.free_without_dropping(x);
@@ -532,7 +585,7 @@ mod tests {
 
         fn pop(&mut self) -> Option<T> {
             let first = self.ptr.take()?;
-            let node = self.arena.box_to_inner(first);
+            let node = self.arena.box_into_inner(first);
             self.ptr = node.rest;
             Some(node.item)
         }
@@ -625,9 +678,9 @@ mod tests {
                     let arena2 = &DropArena::new();
                     let b2 = arena2.alloc(6);
                     *b1 += 100;
-                    assert_eq!(arena1.box_to_inner(b1), 105);
+                    assert_eq!(arena1.box_into_inner(b1), 105);
                     // arena1.drop_box(b2); // Doesn't compile, even without the next line.
-                    let r = arena2.box_to_inner(b2);
+                    let r = arena2.box_into_inner(b2);
                     assert_eq!(arena2.len(), 0);
                     r
                 };
@@ -674,7 +727,7 @@ mod tests {
             let l = vec.len();
             if l == max_len || (l != min_len && random()) {
                 sum += arena
-                    .box_to_inner(pop_random(&mut vec))
+                    .box_into_inner(pop_random(&mut vec))
                     .into_iter()
                     .sum::<Wrapping<usize>>();
             } else {

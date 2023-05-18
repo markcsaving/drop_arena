@@ -119,7 +119,7 @@ pub fn random_add_drop(c: &mut Criterion) {
                 let l = vec.len();
                 if l == max_len || (l != min_len && random()) {
                     sum += arena
-                        .box_to_inner(pop_random(&mut vec))
+                        .box_into_inner(pop_random(&mut vec))
                         .into_iter()
                         .sum::<usize>();
                 } else {
