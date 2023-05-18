@@ -9,9 +9,7 @@
 // single global allocator, a [`DropBox<T>`] is tied to the lifetime of the [`DropArena`] which allocated it. A
 // [`DropBox<T>`] can be consumed by its creator [`DropArena<T>`], which frees up the memory so that the
 // [`DropArena<T>`] can reuse it on another allocation and either returns or drops the underlying `T`.
-
 #![doc = include_str!("../README.md")]
-
 
 use core::borrow::{Borrow, BorrowMut};
 use core::cell::Cell;
@@ -107,6 +105,20 @@ impl<'arena, T> DropBox<'arena, T> {
     /// This function returns the underlying `T` without freeing the memory used to allocate
     /// the `T`. The memory used to allocate the underlying `T` will be freed when the underlying
     /// `DropArena` is freed. To also free the memory, see `DropArena::box_to_inner`.
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::DropArena;
+    /// {
+    ///     let arena = DropArena::new();
+    ///     let mut b = arena.alloc(100);
+    ///     # assert_eq!(arena.len(), 1);
+    ///     *b += 1;
+    ///     assert_eq!(b.into_inner(), 101);
+    ///     // The arena still thinks the allocated memory is in use here,
+    ///     # assert_eq!(arena.len(), 1);
+    /// } // but the memory is released to the system when arena goes out of scope
+    /// ```
     #[inline]
     pub fn into_inner(mut self) -> T {
         // Safety: we don't use `self` again after the call to `take_inner`.
@@ -120,6 +132,32 @@ impl<'arena, T> DropBox<'arena, T> {
     /// Leaks `self`. The underlying `T` will never be dropped, nor will the memory allocated to
     /// store the `T` be reclaimed by the [`DropArena<T>`]. Only once the [`DropArena<T>`] is itself dropped
     /// will the memory be returned to the runtime.
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::DropArena;
+    ///
+    /// struct IntWrapper(i32);
+    /// impl Drop for IntWrapper {
+    ///     fn drop(&mut self) {
+    ///         panic!("We should never drop an IntWrapper.")
+    ///     }
+    /// }
+    ///
+    /// {
+    ///     let arena = DropArena::new();
+    ///     let b = arena.alloc(IntWrapper(0));
+    ///     assert_eq!(arena.len(), 1);
+    ///
+    ///     let b = b.leak();
+    ///     # assert_eq!(arena.len(), 1);
+    ///
+    ///     b.0 += 1;
+    ///     assert_eq!(b.0, 1);
+    ///  } // The memory is reclaimed here, when the arena goes out of scope.
+    /// // Note that we never drop the underlying IntWrapper.
+    /// ```
+    ///
     #[inline]
     pub fn leak(self) -> &'arena mut T {
         // Safety: we must use transmute to avoid violating stacked borrows. We know `self` is a
@@ -132,7 +170,7 @@ impl<'arena, T> DropBox<'arena, T> {
     }
 
     /// Safety: after this function is called, we can't use our `DropBox` as a reference to
-    /// the underlying `T` again. This includes not calling `Drop`.
+    /// the underlying `T` again. This includes not calling `Drop`. This function cannot panic.
     #[inline]
     unsafe fn take_inner(&mut self) -> T {
         ManuallyDrop::take(&mut self.pointer.item)
@@ -168,19 +206,52 @@ impl<'arena, T> DropArena<'arena, T> {
     ///
     /// Note that calling [`drop_box`] is more efficient than dropping the result of [`box_to_inner`].
     /// It may be difficult or impossible for the compiler to optimize the latter into the former.
+    ///
+    /// # Example
+    /// ```
+    /// # use std::ops::Deref;
+    /// use drop_arena::DropArena;
+    ///
+    /// let arena = DropArena::new();
+    /// let b = arena.alloc(5);
+    /// # let addr = b.deref() as *const _ as usize;
+    /// # assert_eq!(arena.len(), 1);
+    /// arena.drop_box(b);
+    /// # assert_eq!(arena.len(), 0);
+    /// // We can now allocate another integer in the same place as the last one.
+    /// let b = arena.alloc(6);
+    /// # assert_eq!(arena.max_len(), 1);
+    /// # assert_eq!(addr, b.deref() as *const _ as usize);
+    /// ```
     #[inline]
     pub fn drop_box(&'arena self, x: DropBox<'arena, T>) {
         // SAFETY: Wrapping x in a ManuallyDrop prevents us from running into issues if `T::drop` panics.
         // If `T::drop` does panic, the spot the `T` occupied will be leaked.
         let mut x = ManuallyDrop::new(x);
-        unsafe {
-            x.deref_mut().drop_inner()
-        };
+        unsafe { x.deref_mut().drop_inner() };
         self.free_without_dropping(ManuallyDrop::into_inner(x))
     }
 
     /// Immediately frees up the memory the arena used to allocate the [`DropBox<T>`], but without
     /// calling [`Drop::drop()`] on the `T`. It is the "opposite" of [`DropBox::leak`].
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::DropArena;
+    ///
+    /// struct IntWrapper(i32);
+    /// impl Drop for IntWrapper {
+    ///     fn drop(&mut self) {
+    ///         panic!("We should never drop an IntWrapper.")
+    ///     }
+    /// }
+    ///
+    /// let arena = DropArena::new();
+    /// let b = arena.alloc(IntWrapper(3));
+    /// # assert_eq!(arena.len(), 1);
+    /// arena.free_without_dropping(b);
+    /// # assert_eq!(arena.len(), 0);
+    /// ```
     #[inline]
     pub fn free_without_dropping(&'arena self, ptr: DropBox<'arena, T>) {
         unsafe {
@@ -194,7 +265,21 @@ impl<'arena, T> DropArena<'arena, T> {
     }
 
     /// This function produces the underlying `T` from a [`DropBox<T>`], freeing the
-    /// associated memory.
+    /// associated memory. Note that it is potentially less efficient to call this function and immediately
+    /// drop the `T` than to simply call `drop_box`.
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::{DropArena, DropBox};
+    ///
+    /// let arena = DropArena::new();
+    /// let string: String = "hello".to_string();
+    /// let string: DropBox<String> = arena.alloc(string);
+    /// let string: String = arena.box_to_inner(string);
+    /// // The arena is now free to reuse the slot that `string` took up.
+    /// # assert_eq!(arena.len(), 0);
+    /// # assert_eq!(string, "hello");
+    /// ```
     #[inline]
     pub fn box_to_inner(&'arena self, mut x: DropBox<'arena, T>) -> T {
         unsafe {
@@ -214,6 +299,15 @@ impl<'arena, T> DropArena<'arena, T> {
     }
 
     /// Allocates `value` in our arena.
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::DropArena;
+    ///
+    /// let arena = DropArena::new();
+    /// let b = arena.alloc(5);
+    /// # assert_eq!(*b, 5)
+    /// ```
     #[inline]
     pub fn alloc(&'arena self, value: T) -> DropBox<'arena, T> {
         let item = Item::new(value);
@@ -234,7 +328,25 @@ impl<'arena, T> DropArena<'arena, T> {
     /// Computes the total number of items that have been allocated, minus the number that have been
     /// deallocated. This function is slow, so it should only be called infrequently.
     /// Note that if this arena is calling [`DropArena::drop_box`] on boxes allocated by another
-    /// [`DropArena`] of the same lifetime, the answer could be negative.
+    /// [`DropArena`] of the same lifetime, the answer could be negative. It is not recommended to have
+    /// two arenas of the same type and lifetime; there is never a need for this as far as I can tell.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use drop_arena::DropArena;
+    ///
+    /// let arena = DropArena::new();
+    /// for i in 0..10 {
+    ///     assert_eq!(arena.len(), i);
+    ///     arena.alloc(i);
+    /// }
+    /// assert_eq!(arena.len(), 10);
+    /// let b = arena.alloc(10);
+    /// assert_eq!(arena.len(), 11);
+    /// arena.drop_box(b);
+    /// assert_eq!(arena.len(), 10);
+    /// ```
     pub fn len(&'arena self) -> isize {
         let mut next = self.start.get();
         let mut count = 0;
@@ -250,12 +362,42 @@ impl<'arena, T> DropArena<'arena, T> {
 
     /// Returns the highest value `self.len()` has ever been over the entire life of `self`
     /// up until the moment this call is made.
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::DropArena;
+    ///
+    /// let arena = DropArena::new();
+    /// let mut boxes = Vec::new();
+    /// for i in 0..10 {
+    ///     boxes.push(arena.alloc(i));
+    /// }
+    /// for bx in boxes {
+    ///     arena.drop_box(bx);
+    /// }
+    ///
+    /// assert_eq!(arena.len(), 0);
+    /// assert_eq!(arena.max_len(), 10);
+    /// ```
     #[inline]
     pub fn max_len(&self) -> usize {
         self.arena.len()
     }
 
     /// Produces a new [`DropArena`] with the default size (around 1024 bytes of capacity).
+    ///
+    /// # Technical note
+    /// Keep in mind that the [`DropArena`] is not laid out as a `[T]` if the size
+    /// of T is less than the size of a `usize`, or if the alignment of a `T` is less than that
+    /// of a `usize`. Thus, it is possible the default size is a little smaller than expected.
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::DropArena;
+    ///
+    /// let arena = DropArena::new();
+    /// # arena.alloc(1);
+    /// ```
     #[inline]
     pub fn new() -> Self {
         Self::from_arena(Arena::new())
@@ -264,6 +406,17 @@ impl<'arena, T> DropArena<'arena, T> {
     /// Exactly like [`Self::new`], except that we allocate a fixed starting capacity. Here,
     /// `n` is the number of elements we store. Be aware that calling this with `n = 0` is exactly
     /// the same as calling it with `n = 1`; we heap-allocate in either case.
+    ///
+    /// # Example
+    /// ```
+    /// use drop_arena::DropArena;
+    ///
+    /// let arena = DropArena::with_capacity(5000);
+    ///
+    /// for i in 0..5000 {
+    ///     arena.alloc(i);
+    /// }
+    /// ```
     #[inline]
     pub fn with_capacity(n: usize) -> Self {
         Self::from_arena(Arena::with_capacity(n))
@@ -274,14 +427,14 @@ impl<'arena, T> DropArena<'arena, T> {
 mod tests {
     #[cfg(no_std)]
     extern crate alloc;
+    use super::*;
     #[cfg(no_std)]
     use alloc::vec;
     #[cfg(no_std)]
     use alloc::vec::Vec;
-    use super::*;
-    use rand::{random, thread_rng, Rng};
     use core::num::Wrapping;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use rand::{random, thread_rng, Rng};
     use std::panic::catch_unwind;
 
     struct Node<'arena, T> {
@@ -488,12 +641,11 @@ mod tests {
         let arena = &DropArena::new();
         let b = arena.alloc(Dropping);
 
-        catch_unwind(core::panic::AssertUnwindSafe( || arena.drop_box(b))).unwrap_err();
+        catch_unwind(core::panic::AssertUnwindSafe(|| arena.drop_box(b))).unwrap_err();
         assert_eq!(CELL.load(Ordering::Relaxed), 1);
         let b = arena.alloc(Dropping);
         catch_unwind(core::panic::AssertUnwindSafe(|| drop(b))).unwrap_err();
         assert_eq!(CELL.load(Ordering::Relaxed), 2);
-
     }
 
     #[test]
