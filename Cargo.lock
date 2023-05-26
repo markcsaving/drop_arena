@@ -98,6 +98,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "consume_on_drop"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d91586aac6b9f9e32032b8ebf58a8eb03f4b58d3e18ea493b8b2083cb7b88e"
+
+[[package]]
 name = "criterion"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -180,6 +186,7 @@ dependencies = [
 name = "drop_arena"
 version = "0.1.0"
 dependencies = [
+ "consume_on_drop",
  "criterion",
  "rand",
  "typed-arena",

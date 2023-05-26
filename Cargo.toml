@@ -14,6 +14,7 @@ keywords = ["arena"]
 
 [dependencies]
 typed-arena = "2.0.2"
+consume_on_drop = "0.1.1"
 
 [features]
 default = ["std"]

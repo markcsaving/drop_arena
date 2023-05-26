@@ -1,6 +1,5 @@
 #![warn(missing_docs)]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
-
 // After modifying the below, please make sure to run the following in Powershell:
 // $ cargo readme > README_utf16.md
 // $ gc .\README-utf16.md | sc -Encoding utf8 README.md
@@ -8,44 +7,44 @@
 //! A [`DropArena<T>`] can allocate or deallocate individual elements of type `T`. Only allocating elements of a fixed size
 //!! and alignment allows the allocator to be extremely efficient compared to an ordinary implementation of `malloc` and `free`.
 //! Think of [`DropArena`] as providing a combination of the functionality of an [`Arena`] and the allocator that makes Boxes.
-//! 
-//! The [`DropArena`] can return a [`DropBox<T>`], which functions very much like a [`Box<T>`] except for being tied to the
-//! [`DropArena`] that allocated it. A [`DropBox`] can be used exactly like a [`&mut T`]; in fact, it is a `repr(transparent)`
-//! wrapper around a [`&mut T`]. 
-//! 
-//! When it comes to getting rid of a [`DropBox<T>`], there are several options. First, you may use [`drop`] (or let the 
-//! [`DropBox`] go out of scope). This will call [`drop`] on the underlying `T`, but it will *not* reclaim the memory needed
-//! to allocate the `T`. Similarly, you may use [`DropBox::into_inner`], which extracts the underlying `T` but does not reclaim
+//!
+//! The [`DropArena`] can return a [`RawDropBox<T>`], which functions very much like a [`Box<T>`] except for being tied to the
+//! [`DropArena`] that allocated it. A [`RawDropBox`] can be used exactly like a [`&mut T`]; in fact, it is a `repr(transparent)`
+//! wrapper around a [`&mut T`].
+//!
+//! When it comes to getting rid of a [`RawDropBox<T>`], there are several options. First, you may use [`drop`] (or let the
+//! [`RawDropBox`] go out of scope). This will call [`drop`] on the underlying `T`, but it will *not* reclaim the memory needed
+//! to allocate the `T`. Similarly, you may use [`RawDropBox::into_inner`], which extracts the underlying `T` but does not reclaim
 //! the memory the `T` formerly occupied. This memory will eventually be reclaimed when the [`DropArena<T>`] is itself dropped.
-//! Finally, you may call [`DropBox::leak`], which produces a [`&mut T`]. This means that unless unsafe code is used, the `T` will
-//! never be [`drop`]ed. However, when the [`DropArena`] which allocated the [`DropBox`] is dropped, the memory will be reclaimed.
-//! 
-//! In order to reclaim the memory allocated to a [`DropBox<T>`], we need a reference to the [`DropArena<T>`] which allocated it.
-//! We can use the [`DropArena::drop_box`] method on a [`DropBox`] to drop the underlying value and reclaim the memory. We can 
-//! also use the [`DropArena::box_into_inner`] method to retrieve the underlying `T` from a [`DropBox<T>`] and reclaim the memory
+//! Finally, you may call [`RawDropBox::leak`], which produces a [`&mut T`]. This means that unless unsafe code is used, the `T` will
+//! never be [`drop`]ed. However, when the [`DropArena`] which allocated the [`RawDropBox`] is dropped, the memory will be reclaimed.
+//!
+//! In order to reclaim the memory allocated to a [`RawDropBox<T>`], we need a reference to the [`DropArena<T>`] which allocated it.
+//! We can use the [`DropArena::drop_box`] method on a [`RawDropBox`] to drop the underlying value and reclaim the memory. We can
+//! also use the [`DropArena::box_into_inner`] method to retrieve the underlying `T` from a [`RawDropBox<T>`] and reclaim the memory
 //! it used.
-//! 
-//! To guarantee that an arena can only reclaim memory from [`DropBox`]es it allocated (or one allocated by a drop arena with 
+//!
+//! To guarantee that an arena can only reclaim memory from [`RawDropBox`]es it allocated (or one allocated by a drop arena with
 //! exactly the same lifetime), we need to use lifetime magic. A [`DropArena`] is tagged with the lifetime it will live, and
-//! it has an invariant relationship with this lifetime. [`DropBox`]es have an invariant relationship with the lifetime of 
-//! the [`DropArena`] that created them. 
-//! 
+//! it has an invariant relationship with this lifetime. [`RawDropBox`]es have an invariant relationship with the lifetime of
+//! the [`DropArena`] that created them.
+//!
 //! It is not recommended to have multiple [`DropArena<T>`]s with the same lifetime. In particular, if arena 1 keeps allocating
-//! [`DropBox<T>`]s which arena 2 keeps consuming, you won't get any benefit out of reclaiming the memory. However, it is 
+//! [`RawDropBox<T>`]s which arena 2 keeps consuming, you won't get any benefit out of reclaiming the memory. However, it is
 //! perfectly safe to do this.
-//! 
+//!
 //! # Complexity
-//! 
-//! Calling [`DropArena::box_into_inner()`] or [`DropBox::into_inner()`] is O(1) with very small constants (except if 
-//! the size of `T` is large - then copying the `T` dominates). The corresponding [`drop`] functions are also O(1) + the 
+//!
+//! Calling [`DropArena::box_into_inner()`] or [`RawDropBox::into_inner()`] is O(1) with very small constants (except if
+//! the size of `T` is large - then copying the `T` dominates). The corresponding [`drop`] functions are also O(1) + the
 //! time the call to [`Drop::drop`] takes with small constants.
-//! 
+//!
 //! Allocating is also very fast. There are three possible paths for an allocation. First, the arena has a free space where
-//! something was previously allocated. In this case, allocation is O(1) with small constants. Second, the preallocated
+//! something was previously allocated. In this case, allocation is O(1) with small constants. Second, the pre-allocated
 //! capacity of the Arena is large enough to fit one more element. In this case, allocation is O(1) with small constants.
 //! Third, the arena has genuinely run out of space (this is the most uncommon case, even when we are only doing allocations
-//! and no drops). In this case, we must allocate more space using the system allocator. We follow the same guidelines as 
-//! [`typed_arena`], making a single allocation with enough space for many more `T`s (in fact, we actually implement 
+//! and no drops). In this case, we must allocate more space using the system allocator. We follow the same guidelines as
+//! [`typed_arena`], making a single allocation with enough space for many more `T`s (in fact, we actually implement
 //! [`DropArena`] using [`typed_arena`]).
 //!
 //! # Recursive owning data structures
@@ -53,14 +52,14 @@
 //! We can write some basic owning data structures using our arena as follows. The list implementation
 //! below is inspired by [Learning Rust With Entirely Too Many Linked Lists](https://rust-unofficial.github.io/too-many-lists/index.html).
 //!
-//! ```
-//! use drop_arena::{DropArena, DropBox};
+//!```
+//! use drop_arena::{DropArena, RawDropBox};
 //! struct Node<'arena, T> {
 //!     item: T,
 //!     rest: Link<'arena, T>,
 //! }
 //!
-//! type Link<'arena, T> = Option<DropBox<'arena, Node<'arena, T>>>;
+//! type Link<'arena, T> = Option<RawDropBox<'arena, Node<'arena, T>>>;
 //!
 //! struct List<'arena, T> {
 //!     arena: &'arena DropArena<'arena, Node<'arena, T>>,
@@ -105,121 +104,129 @@
 //! }
 //!
 //! for i in (0..100).rev() {
-//!     assert_eq!(list.pop(), i);
+//!     assert_eq!(list.pop().unwrap(), i);
 //! }
 //! ```
-//! 
+//!
 //! # Areas of Improvement
 //!
-//! This allocator works for zero-sized types, but it is not efficient in this case. I plan to address this in the future 
+//! This allocator works for zero-sized types, but it is not efficient in this case. I plan to address this in the future
 //! using conditional types. The issue is that keeping a free block list requires pointers. However, in theory, when we are
 //! dealing with ZSTs, we could just choose not to have a free list at all. I would like to separately implement a special
 //! arena for ZSTs using [CondType](https://!github.com/nvzqz/condtype), but this crate is still limited. In order for it to be usable here, we need
 //! [this issue](https://!github.com/rust-lang/project-const-generics/issues/26) to be resolved.
-//! 
+//!
 //! Much more testing is required to ensure that [`DropArena`]s are safe. I've done some elementary experimentation with Miri,
-//! but exhaustive fuzzing is needed. This code uses a fair amount of `unsafe`, and that means there are plenty of chances for 
+//! but exhaustive fuzzing is needed. This code uses a fair amount of `unsafe`, and that means there are plenty of chances for
 //! serious bugs to appear. I think I've caught most of them, but it's not impossible I neglected one.
 //!
-//! Making sure that a [`DropBox<T>`] implements all the traits that a [`Box<T>`] does seems desirable.
+//! Making sure that a [`RawDropBox<T>`] implements all the traits that a [`Box<T>`] does seems desirable.
 //!
 //! # Maintenance
 //!
 //! This is my first open-source project, so I may not be able to find time to properly maintain it.
 //! That said, I will do my best, time-permitting, especially for serious bugs. Please be patient.
 
-
+use consume_on_drop::Consume;
 use core::borrow::{Borrow, BorrowMut};
 use core::cell::Cell;
-use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
-use core::ptr::NonNull;
-use core::{mem, ptr};
 
 use typed_arena::Arena;
 
-
-
 /// An Item is either a free block, in which case it has a pointer to the next free block,
 /// or it is occupied by a `T`.
-union Item<T> {
-    /// In the `pointer` variant, this [`Item<T>`] is a node in a linked list of [`Item<T>`]s,
-    /// all of which are in the `pointer` variant. The pointer is semantically a [`&'arena mut T`], where
+union Item<'arena, T> {
+    /// In the `next_free` variant, this [`Item<T>`] is a node in a linked list of [`Item<T>`]s,
+    /// all of which are in the `next_free` variant. The pointer is semantically a [`&'arena mut T`], where
     /// where `&'arena` is the lifetime of the arena the [`Item`] occurs within; it should have the
     /// same no-alias guarantees. Note that if we have two [`DropArena<'arena, T>`]s, their free
     /// lists can "cross over" in the sense that arena 1's free list can include blocks originally
     /// allocated by 2 and vice versa, but their lists cannot overlap because of the no-alias
     /// invariant.
-    pointer: Option<NonNull<Item<T>>>,
+    next_free: ManuallyDrop<Option<&'arena mut Item<'arena, T>>>,
 
-    /// In the `item`, the `T`'s lifetime is controlled by a `DropBox<T>`.
-    item: ManuallyDrop<T>,
+    /// In the `value`, the `T`'s lifetime is controlled by a `DropBox<T>`.
+    value: ManuallyDrop<T>,
 }
 
-impl<T> Item<T> {
+impl<'arena, T> Item<'arena, T> {
     #[inline]
     fn new(value: T) -> Self {
         Self {
-            item: ManuallyDrop::new(value),
+            value: ManuallyDrop::new(value),
+        }
+    }
+
+    #[inline]
+    fn from_ptr(ptr: Option<&'arena mut Self>) -> Self {
+        Self {
+            next_free: ManuallyDrop::new(ptr),
         }
     }
 }
 
-/// A ZST which invariantly depends on `'b`.
-type Invariant<'b> = PhantomData<*mut &'b i32>;
 
 /// An owning pointer to a `T` which has been allocated with a `DropArena<'arena, T>`.
 #[repr(transparent)]
-// safety: a [`DropBox<'arena, T>`] must be transmutable to a [`&'arena mut T`]. *self.pointer
-// must be an `Item` in the `item` configuration, with an undropped `T`.
-pub struct DropBox<'arena, T> {
-    pointer: &'arena mut Item<T>,
-    _phantom: Invariant<'arena>,
+// SAFETY: a [`DropBox<'arena, T>`] must not do anything on a drop.
+pub struct RawDropBox<'arena, T> {
+    pointer: &'arena mut Item<'arena, T>,
 }
 
-impl<'arena, T> Deref for DropBox<'arena, T> {
+impl<'arena, T> Consume for RawDropBox<'arena, T> {
+    #[inline]
+    fn consume(mut self) {
+        // SAFETY: we don't do anything with `self` after the call to `drop_inner`.
+        unsafe { self.drop_inner() }
+    }
+}
+
+impl<'arena, T> Deref for RawDropBox<'arena, T> {
     type Target = T;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        // Safety: it's an invariant that self.pointer is always in the item configuration
+        // SAFETY: it's an invariant that self.pointer is always in the `value` configuration
         // with an undropped T.
-        unsafe { &self.pointer.item }
+        unsafe { &self.pointer.value }
     }
 }
 
-impl<'arena, T> Borrow<T> for DropBox<'arena, T> {
+impl<'arena, T> Borrow<T> for RawDropBox<'arena, T> {
     #[inline]
     fn borrow(&self) -> &T {
         self.deref()
     }
 }
 
-impl<'arena, T> DerefMut for DropBox<'arena, T> {
+impl<'arena, T> DerefMut for RawDropBox<'arena, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // Safety: it's an invariant that self.pointer is always in the item configuration
+        // SAFETY: it's an invariant that self.pointer is always in the value configuration
         // with an undropped T.
-        unsafe { &mut self.pointer.item }
+        unsafe { &mut self.pointer.value }
     }
 }
 
-impl<'arena, T> BorrowMut<T> for DropBox<'arena, T> {
+impl<'arena, T> BorrowMut<T> for RawDropBox<'arena, T> {
     #[inline]
     fn borrow_mut(&mut self) -> &mut T {
         self.deref_mut()
     }
 }
 
-impl<'arena, T> DropBox<'arena, T> {
-    /// Safety: after this function is called, we can't use our [`DropBox`] as a reference to
-    /// the underlying `T` again. This includes not calling [`DropBox::drop`] on `self`. Warning: this
-    /// function can panic, but this function panicking doesn't relieve the caller of its
-    /// obligations not to use `self` again as a reference to `T`, including via [`drop`].
+impl<'arena, T> RawDropBox<'arena, T> {
+    /// SAFETY: after this function is called, we can't use our [`RawDropBox`] as a reference to
+    /// the underlying `T` again. Warning: this function can panic, but this function panicking
+    /// doesn't relieve the caller of its obligations not to use `self` again as a reference to `T`.
+    ///
+    /// It is safe to use [`DropArena::free_without_dropping`] on `self` after a call to this
+    /// function.
     #[inline]
     unsafe fn drop_inner(&mut self) {
-        ptr::drop_in_place::<T>(self.deref_mut())
+        ManuallyDrop::drop(&mut self.pointer.value);
     }
 
     /// This function returns the underlying `T` without freeing the memory used to allocate
@@ -241,12 +248,8 @@ impl<'arena, T> DropBox<'arena, T> {
     /// ```
     #[inline]
     pub fn into_inner(mut self) -> T {
-        // Safety: we don't use `self` again after the call to `take_inner`.
-        unsafe {
-            let result = self.take_inner();
-            mem::forget(self);
-            result
-        }
+        // SAFETY: we don't use `self` again after the call to `take_inner`.
+        unsafe { self.take_inner() }
     }
 
     /// Leaks `self`. The underlying `T` will never be dropped, nor will the memory allocated to
@@ -280,43 +283,32 @@ impl<'arena, T> DropBox<'arena, T> {
     ///
     #[inline]
     pub fn leak(self) -> &'arena mut T {
-        // Safety: we must use transmute to avoid violating stacked borrows. We know `self` is a
-        // #[repr(transparent)] wrapper around `&'arena mut Item<T>`. Furthermore, we know that
-        // self.pointer points to an Item in the item configuration with an undropped T.
-        unsafe {
-            let item_ptr: &'arena mut Item<T> = mem::transmute(self);
-            &mut item_ptr.item
-        }
+        let item_ptr = self.pointer;
+        // SAFETY: the existence of `self` means that the underlying Item is in the value configuration
+        // with an undropped T.
+        unsafe { &mut item_ptr.value }
     }
 
-    /// Safety: after this function is called, we can't use our `DropBox` as a reference to
-    /// the underlying `T` again. This includes not calling `Drop`. This function cannot panic.
+    /// SAFETY: after this function is called, we can't use our [`RawDropBox`] as a reference to
+    /// the underlying `T` again. This function cannot panic.
+    ///
+    /// It is safe to use [`DropArena::free_without_dropping`] on `self` after a call to this
+    /// method.
     #[inline]
     unsafe fn take_inner(&mut self) -> T {
-        ManuallyDrop::take(&mut self.pointer.item)
-    }
-}
-
-/// Note that dropping the `DropBox<'a, 'b, T>` will not free the memory used to allocate
-/// the `T`, but it will drop the `T`.
-impl<'a, T> Drop for DropBox<'a, T> {
-    #[inline]
-    fn drop(&mut self) {
-        // Safety: we can't use `self` at all after this.
-        unsafe { self.drop_inner() }
+        ManuallyDrop::take(&mut self.pointer.value)
     }
 }
 
 /// Our [`DropArena`] depends invariantly on its own lifetime `'arena`. This allows us to ensure
-/// that [`DropBox`]s are collected by their corresponding [`DropArena`]s (or those of exactly
+/// that [`RawDropBox`]s are collected by their corresponding [`DropArena`]s (or those of exactly
 /// the same lifetime, which is safe but inefficient).
 ///
 /// Note that `DropArena` is currently inefficient but functional for ZSTs. I don't know why you'd
 /// want to use it for ZSTs, but if you do, be aware `DropArena` will allocate in this case.
 pub struct DropArena<'arena, T> {
-    arena: Arena<Item<T>>,
-    start: Cell<Option<NonNull<Item<T>>>>,
-    _phantom: Invariant<'arena>,
+    arena: Arena<Item<'arena, T>>,
+    start: Cell<Option<&'arena mut Item<'arena, T>>>,
 }
 
 impl<'arena, T> DropArena<'arena, T> {
@@ -344,16 +336,14 @@ impl<'arena, T> DropArena<'arena, T> {
     /// # assert_eq!(addr, b.deref() as *const _ as usize);
     /// ```
     #[inline]
-    pub fn drop_box(&'arena self, x: DropBox<'arena, T>) {
-        // SAFETY: Wrapping x in a ManuallyDrop prevents us from running into issues if `T::drop` panics.
-        // If `T::drop` does panic, the spot the `T` occupied will be leaked.
-        let mut x = ManuallyDrop::new(x);
-        unsafe { x.deref_mut().drop_inner() };
-        self.free_without_dropping(ManuallyDrop::into_inner(x))
+    pub fn drop_box(&'arena self, mut x: RawDropBox<'arena, T>) {
+        // SAFETY: we don't use the DropBox again to refer to a T.
+        unsafe { x.drop_inner() };
+        self.free_without_dropping(x)
     }
 
-    /// Immediately frees up the memory the arena used to allocate the [`DropBox<T>`], but without
-    /// calling [`Drop::drop()`] on the `T`. It is the "opposite" of [`DropBox::leak`].
+    /// Immediately frees up the memory the arena used to allocate the [`RawDropBox<T>`], but without
+    /// calling [`Drop::drop()`] on the `T`. It is the "opposite" of [`RawDropBox::leak`].
     ///
     /// # Example
     /// ```
@@ -373,48 +363,40 @@ impl<'arena, T> DropArena<'arena, T> {
     /// # assert_eq!(arena.len(), 0);
     /// ```
     #[inline]
-    pub fn free_without_dropping(&'arena self, ptr: DropBox<'arena, T>) {
-        unsafe {
-            // Safety: a DropBox<'arena, T> is representationally equivalent to a &'arena mut Item<T>,
-            // which is representationally equivalent to a NonNull<Item<T>>
-            let mut ptr: NonNull<Item<T>> = mem::transmute(ptr);
-            // Safety: ptr came from a mutable reference with a 'arena lifetime, so it's valid
-            // for that whole lifetime.
-            ptr.as_mut().pointer = self.start.replace(Some(ptr));
-        }
+    pub fn free_without_dropping(&'arena self, ptr: RawDropBox<'arena, T>) {
+        *ptr.pointer = Item::from_ptr(self.start.take());
+        self.start.set(Some(ptr.pointer));
     }
 
-    /// This function produces the underlying `T` from a [`DropBox<T>`], freeing the
+    /// This function produces the underlying `T` from a [`RawDropBox<T>`], freeing the
     /// associated memory. Note that it is potentially less efficient to call this function and immediately
     /// drop the `T` than to simply call `drop_box`.
     ///
     /// # Example
     /// ```
-    /// use drop_arena::{DropArena, DropBox};
+    /// use drop_arena::{DropArena, RawDropBox};
     ///
     /// let arena = DropArena::new();
     /// let string: String = "hello".to_string();
-    /// let string: DropBox<String> = arena.alloc(string);
+    /// let string: RawDropBox<String> = arena.alloc(string);
     /// let string: String = arena.box_into_inner(string);
     /// // The arena is now free to reuse the slot that `string` took up.
     /// # assert_eq!(arena.len(), 0);
     /// # assert_eq!(string, "hello");
     /// ```
     #[inline]
-    pub fn box_into_inner(&'arena self, mut x: DropBox<'arena, T>) -> T {
-        unsafe {
-            let result = x.take_inner();
+    pub fn box_into_inner(&'arena self, mut x: RawDropBox<'arena, T>) -> T {
+        // SAFETY: we only use `x` again by calling `free_without_dropping`, which is safe.
+            let result = unsafe { x.take_inner() };
             self.free_without_dropping(x);
             result
-        }
     }
 
     #[inline]
-    fn from_arena(arena: Arena<Item<T>>) -> Self {
+    fn from_arena(arena: Arena<Item<'arena, T>>) -> Self {
         DropArena {
             arena,
             start: Cell::new(None),
-            _phantom: Default::default(),
         }
     }
 
@@ -429,19 +411,19 @@ impl<'arena, T> DropArena<'arena, T> {
     /// # assert_eq!(*b, 5)
     /// ```
     #[inline]
-    pub fn alloc(&'arena self, value: T) -> DropBox<'arena, T> {
+    pub fn alloc(&'arena self, value: T) -> RawDropBox<'arena, T> {
         let item = Item::new(value);
-        DropBox {
-            pointer: match self.start.get() {
+        RawDropBox {
+            pointer: match self.start.take() {
                 None => self.arena.alloc(item),
-                Some(mut pointer) => unsafe {
-                    self.start.set(pointer.as_ref().pointer);
-                    let pointer = pointer.as_mut();
+                Some(pointer) => {
+                    // SAFETY: pointer is the start of the free list, and must be in the
+                    // next_free configuration.
+                    self.start.set(unsafe { pointer.next_free.take() });
                     *pointer = item;
                     pointer
-                },
+                }
             },
-            _phantom: Default::default(),
         }
     }
 
@@ -467,17 +449,24 @@ impl<'arena, T> DropArena<'arena, T> {
     /// arena.drop_box(b);
     /// assert_eq!(arena.len(), 10);
     /// ```
-    pub fn len(&'arena self) -> isize {
-        let mut next = self.start.get();
+    pub fn len(&self) -> isize {
         let mut count = 0;
-        while let Some(ptr) = next {
-            count += 1;
-            unsafe { next = ptr.as_ref().pointer }
+        {
+            let start = self.start.take();
+            let mut next = &start;
+            while let Some(ptr) = next {
+                count += 1;
+                // SAFETY: ptr is in the free list, so it must be in the next_free configuration.
+                unsafe { next = &ptr.next_free }
+            }
+            self.start.set(start);
         }
         assert!(count <= isize::MAX as usize);
         let len = self.arena.len();
         assert!(len <= isize::MAX as usize);
-        (self.arena.len() as isize) - (count as isize)
+        // Overflow: both quantities being subtracted are nonnegative, so overflow and
+        // underflow are both impossible.
+        (len as isize) - (count as isize)
     }
 
     /// Returns the highest value `self.len()` has ever been over the entire life of `self`
@@ -562,7 +551,7 @@ mod tests {
         rest: Ptr<'arena, T>,
     }
 
-    type Ptr<'arena, T> = Option<DropBox<'arena, Node<'arena, T>>>;
+    type Ptr<'arena, T> = Option<RawDropBox<'arena, Node<'arena, T>>>;
 
     struct List<'arena, T> {
         arena: &'arena DropArena<'arena, Node<'arena, T>>,
