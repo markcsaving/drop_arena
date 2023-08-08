@@ -167,7 +167,7 @@ impl<'arena, T> Item<'arena, T> {
     }
 }
 
-/// A pointer to a 'T' which has been allocated with a `DropArena<'arena, T>`. Dropping a `DropBox`
+/// A pointer to a `T` which has been allocated with a [`DropArena<'arena, T>`]. Dropping a `DropBox`
 /// will drop the underlying `T` but won't free the memory.
 #[repr(transparent)]
 pub struct DropBox<'arena, T>(ConsumeOnDrop<RawDropBox<'arena, T>>);
@@ -861,7 +861,8 @@ mod tests {
 
         catch_unwind(core::panic::AssertUnwindSafe(|| arena.drop_box(b))).unwrap_err();
         assert_eq!(CELL.load(Ordering::Relaxed), 1);
-        assert_eq!(arena.len(), 0);
+        assert_eq!(arena.len(), 0); // This line makes sure we freed the memory even when
+        // calling drop_box panics.
         let b = arena.alloc(Dropping);
         catch_unwind(core::panic::AssertUnwindSafe(|| drop(b))).unwrap_err();
         assert_eq!(CELL.load(Ordering::Relaxed), 2);
