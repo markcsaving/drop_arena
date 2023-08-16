@@ -224,7 +224,6 @@ impl<'arena, T> Deref for RawDropBox<'arena, T> {
     }
 }
 
-
 impl<'arena, T> DerefMut for RawDropBox<'arena, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -429,8 +428,7 @@ impl<'arena, T> DropArena<'arena, T> {
     fn drop_raw_box(&'arena self, x: RawDropBox<'arena, T>) {
         // Using WithConsumer allows us to call self.free_raw_without_dropping(x) even when
         // the call to x.drop_inner panics.
-        let mut x = WithConsumer::new(x,
-                                      |x| self.free_raw_without_dropping(x));
+        let mut x = WithConsumer::new(x, |x| self.free_raw_without_dropping(x));
 
         // SAFETY: after calling x.drop_inner, the only thing we do with the RawDropBox is calling
         // self.free_raw_without_dropping(x).
@@ -645,11 +643,16 @@ impl<'arena, T> DropArena<'arena, T> {
 mod tests {
     #[cfg(no_std)]
     extern crate alloc;
-    use super::*;
+    #[cfg(no_std)]
+    use alloc::string::String;
     #[cfg(no_std)]
     use alloc::vec;
     #[cfg(no_std)]
     use alloc::vec::Vec;
+
+    use super::*;
+
+
     use core::num::Wrapping;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use rand::{random, thread_rng, Rng};
@@ -862,7 +865,7 @@ mod tests {
         catch_unwind(core::panic::AssertUnwindSafe(|| arena.drop_box(b))).unwrap_err();
         assert_eq!(CELL.load(Ordering::Relaxed), 1);
         assert_eq!(arena.len(), 0); // This line makes sure we freed the memory even when
-        // calling drop_box panics.
+                                    // calling drop_box panics.
         let b = arena.alloc(Dropping);
         catch_unwind(core::panic::AssertUnwindSafe(|| drop(b))).unwrap_err();
         assert_eq!(CELL.load(Ordering::Relaxed), 2);
@@ -880,4 +883,20 @@ mod tests {
         // arena1.len(); // this line must not compile
     }
 
+    // Note that this test is technically not guaranteed to pass, because needs_drop can return true
+    // even when nothing happens on a drop. However, if the test fails, you should check to make sure
+    // that neither Item nor RawDropBox does anything on a drop.
+    #[test]
+    fn test_needs_drop() {
+        assert!(!core::mem::needs_drop::<RawDropBox<String>>());
+        assert!(!core::mem::needs_drop::<Item<String>>());
+    }
+
+    #[test]
+    fn test_null_ptr() {
+        assert_eq!(
+            core::mem::size_of::<DropBox<i32>>(),
+            core::mem::size_of::<Option<DropBox<i32>>>()
+        );
+    }
 }
