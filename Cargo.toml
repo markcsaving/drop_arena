@@ -1,6 +1,6 @@
 [package]
 name = "drop_arena"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Mark Saving <marksaving@gmail.com>"]
 readme = "README.md"
@@ -13,12 +13,11 @@ keywords = ["arena"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-typed-arena = "2.0.2"
 consume_on_drop = "0.1.1"
 
-[features]
-default = ["std"]
-std = []
+[dependencies.typed-arena]
+version = "2.0.2"
+default-features = false
 
 [dev-dependencies]
 criterion = "0.5.1"

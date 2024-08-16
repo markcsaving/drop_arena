@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-#![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![cfg_attr(not(test), no_std)]
 // After modifying the below, please make sure to run the following in Powershell:
 // $ cargo readme > README_utf16.md
 // $ gc .\README_utf16.md | sc -Encoding utf8 README.md
@@ -126,6 +126,8 @@
 //!
 //! This is my first open-source project, so I may not be able to find time to properly maintain it.
 //! That said, I will do my best, time-permitting, especially for serious bugs. Please be patient.
+
+extern crate alloc;
 
 use consume_on_drop::{Consume, ConsumeOnDrop, WithConsumer};
 use core::borrow::{Borrow, BorrowMut};
@@ -641,14 +643,12 @@ impl<'arena, T> DropArena<'arena, T> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(no_std)]
-    extern crate alloc;
-    #[cfg(no_std)]
+
+    extern crate std;
+
     use alloc::string::String;
-    #[cfg(no_std)]
     use alloc::vec;
-    #[cfg(no_std)]
-    use alloc::vec::Vec;
+    use std::vec::*;
 
     use super::*;
 
@@ -747,7 +747,7 @@ mod tests {
             drop(list);
             assert_eq!(arena.len(), 0);
 
-            println!("Finished with Tester::use_arena");
+            // println!("Finished with Tester::use_arena");
         };
     }
 

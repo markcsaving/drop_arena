@@ -27,7 +27,7 @@ pub fn leak_all(c: &mut Criterion) {
         b.iter(|| {
             let arena = Arena::new();
             for i in 0..500 {
-                std::mem::forget(std::hint::black_box(arena.alloc(i)));
+                std::hint::black_box(arena.alloc(i));
             }
         })
     });
